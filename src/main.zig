@@ -48,7 +48,7 @@ pub const order = order_builder.order;
 
 const Args = struct {
     host: []const u8 = "127.0.0.1",
-    port: u16 = 1234,
+    port: u16 = 12345,
     transport: Transport = .tcp,
     protocol: Protocol = .binary,
     command: Command = .help,
@@ -164,7 +164,7 @@ fn printHelp() void {
         \\
         \\CONNECTION OPTIONS:
         \\    --host <HOST>    Server host (default: 127.0.0.1)
-        \\    --port <PORT>    Server port (default: 1234)
+        \\    --port <PORT>    Server port (default: 12345)
         \\    --tcp            Use TCP transport (default)
         \\    --udp            Use UDP transport
         \\    --binary         Use binary protocol (default)
@@ -332,7 +332,8 @@ fn runBenchmark(args: Args) !void {
     var buf: [256]u8 = undefined;
     const stats = tracker.format(&buf);
     try stdout.print("\nResults: {s}\n", .{stats});
-    try stdout.print("Throughput: {d} msg/sec\n", .{iterations * 1_000_000_000 / tracker.sum});
+    const throughput: u64 = if (tracker.sum > 0) @as(u64, iterations) * 1_000_000_000 / tracker.sum else 0;
+    try stdout.print("Throughput: {d} msg/sec\n", .{throughput});
 }
 
 // ============================================================

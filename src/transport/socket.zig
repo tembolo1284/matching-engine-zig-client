@@ -55,7 +55,7 @@ pub const Address = struct {
         const addr = std.net.Address.initIp4(ip, port);
         return .{
             .inner = addr.any,
-            .len = @sizeOf(std.posix.sockaddr_in),
+            .len = 16, // sizeof(sockaddr_in) is always 16 bytes
         };
     }
 
@@ -304,8 +304,8 @@ fn setRecvTimeout(handle: Handle, ms: u32) SocketError!void {
     } else {
         // POSIX uses timeval
         const tv = std.posix.timeval{
-            .sec = @intCast(ms / 1000),
-            .usec = @intCast((ms % 1000) * 1000),
+            .tv_sec = @intCast(ms / 1000),
+            .tv_usec = @intCast((ms % 1000) * 1000),
         };
         std.posix.setsockopt(
             handle,
@@ -326,8 +326,8 @@ fn setSendTimeout(handle: Handle, ms: u32) SocketError!void {
         ) catch |err| return translateError(err);
     } else {
         const tv = std.posix.timeval{
-            .sec = @intCast(ms / 1000),
-            .usec = @intCast((ms % 1000) * 1000),
+            .tv_sec = @intCast(ms / 1000),
+            .tv_usec = @intCast((ms % 1000) * 1000),
         };
         std.posix.setsockopt(
             handle,
