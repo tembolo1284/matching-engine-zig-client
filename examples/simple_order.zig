@@ -11,7 +11,7 @@ pub fn main() !void {
     // Connect using TCP with binary protocol (most common setup)
     try stdout.print("Connecting to matching engine...\n", .{});
 
-    var client = me.connectTcpBinary("127.0.0.1", 12345) catch |err| {
+    var client = me.connectTcpBinary("127.0.0.1", 1234) catch |err| {
         try stdout.print("Connection failed: {s}\n", .{@errorName(err)});
         try stdout.print("Make sure the matching engine is running.\n", .{});
         return err;

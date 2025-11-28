@@ -58,7 +58,7 @@ zig build test
 ```
 CONNECTION:
     --host <HOST>    Server host (default: 127.0.0.1)
-    --port <PORT>    Server port (default: 12345)
+    --port <PORT>    Server port (default: 1234)
     --tcp            Use TCP transport (default)
     --udp            Use UDP transport
     --binary         Use binary protocol (default)
@@ -85,7 +85,7 @@ const me = @import("me_client");
 
 pub fn main() !void {
     // Connect with TCP/binary (most common)
-    var client = try me.connectTcpBinary("127.0.0.1", 12345);
+    var client = try me.connectTcpBinary("127.0.0.1", 1234);
     defer client.deinit();
 
     // Method 1: Direct API

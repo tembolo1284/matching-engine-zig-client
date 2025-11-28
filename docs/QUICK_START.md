@@ -112,7 +112,7 @@ First, make sure your C matching engine is running:
 
 ```bash
 # In another terminal, start the matching engine
-./matching_engine --tcp --port 12345
+./matching_engine --tcp --port 1234
 ```
 
 Then connect with the Zig client:
@@ -122,7 +122,7 @@ Then connect with the Zig client:
 ./zig-out/bin/me-client order --symbol IBM --price 10000 --qty 50 --buy --order-id 1
 
 # Expected output:
-# Connecting to 127.0.0.1:12345 (tcp/binary)...
+# Connecting to 127.0.0.1:1234 (tcp/binary)...
 # Sending order: buy IBM 50@10000 (user=1, oid=1)
 # Order sent.
 # Waiting for response...
@@ -133,7 +133,7 @@ Then connect with the Zig client:
 
 Start server with multicast:
 ```bash
-./matching_engine --tcp --port 12345 --multicast 239.255.0.1:5000
+./matching_engine --tcp --port 1234 --multicast 239.255.0.1:5000
 ```
 
 Subscribe:
@@ -148,9 +148,9 @@ Subscribe:
 The matching engine server isn't running or wrong port:
 ```bash
 # Check if server is listening
-netstat -an | grep 12345
+netstat -an | grep 1234
 # or
-lsof -i :12345
+lsof -i :1234
 ```
 
 ### Struct size assertion failed

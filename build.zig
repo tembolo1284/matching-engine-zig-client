@@ -5,17 +5,22 @@ pub fn build(b: *std.Build) void {
     const optimize = b.standardOptimizeOption(.{});
 
     // ============================================================
-    // Main client executable
+    // Main library module (shared by exe and examples)
     // ============================================================
-    const exe = b.addExecutable(.{
-        .name = "me-client",
+    const me_client_mod = b.createModule(.{
         .root_source_file = b.path("src/main.zig"),
         .target = target,
         .optimize = optimize,
     });
+    me_client_mod.link_libc = true;
 
-    // Link libc for cross-platform socket APIs
-    exe.linkLibC();
+    // ============================================================
+    // Main client executable
+    // ============================================================
+    const exe = b.addExecutable(.{
+        .name = "me-client",
+        .root_module = me_client_mod,
+    });
 
     b.installArtifact(exe);
 
@@ -30,24 +35,32 @@ pub fn build(b: *std.Build) void {
     // ============================================================
     // Unit tests
     // ============================================================
-    const unit_tests = b.addTest(.{
+    const unit_test_mod = b.createModule(.{
         .root_source_file = b.path("src/main.zig"),
         .target = target,
         .optimize = optimize,
     });
-    unit_tests.linkLibC();
+    unit_test_mod.link_libc = true;
+
+    const unit_tests = b.addTest(.{
+        .root_module = unit_test_mod,
+    });
 
     const run_unit_tests = b.addRunArtifact(unit_tests);
     const test_step = b.step("test", "Run unit tests");
     test_step.dependOn(&run_unit_tests.step);
 
     // Protocol-specific tests
-    const protocol_tests = b.addTest(.{
+    const protocol_test_mod = b.createModule(.{
         .root_source_file = b.path("tests/protocol_tests.zig"),
         .target = target,
         .optimize = optimize,
     });
-    protocol_tests.linkLibC();
+    protocol_test_mod.link_libc = true;
+
+    const protocol_tests = b.addTest(.{
+        .root_module = protocol_test_mod,
+    });
 
     const run_protocol_tests = b.addRunArtifact(protocol_tests);
     const protocol_test_step = b.step("test-protocol", "Run protocol codec tests");
@@ -63,18 +76,20 @@ pub fn build(b: *std.Build) void {
     };
 
     for (examples) |example| {
-        const example_exe = b.addExecutable(.{
-            .name = example.name,
+        const example_mod = b.createModule(.{
             .root_source_file = b.path(example.path),
             .target = target,
             .optimize = optimize,
         });
-        example_exe.linkLibC();
+        example_mod.link_libc = true;
 
-        // Add src as module root for imports
-        example_exe.root_module.addImport("me_client", b.createModule(.{
-            .root_source_file = b.path("src/main.zig"),
-        }));
+        // Add me_client as import
+        example_mod.addImport("me_client", me_client_mod);
+
+        const example_exe = b.addExecutable(.{
+            .name = example.name,
+            .root_module = example_mod,
+        });
 
         const install_example = b.addInstallArtifact(example_exe, .{});
         b.getInstallStep().dependOn(&install_example.step);
@@ -94,13 +109,17 @@ pub fn build(b: *std.Build) void {
     const cross_step = b.step("cross", "Build for all supported platforms");
 
     for (cross_targets) |t| {
-        const cross_exe = b.addExecutable(.{
-            .name = "me-client",
+        const cross_mod = b.createModule(.{
             .root_source_file = b.path("src/main.zig"),
             .target = b.resolveTargetQuery(t),
             .optimize = .ReleaseFast,
         });
-        cross_exe.linkLibC();
+        cross_mod.link_libc = true;
+
+        const cross_exe = b.addExecutable(.{
+            .name = "me-client",
+            .root_module = cross_mod,
+        });
 
         const target_name = std.fmt.comptimePrint("{s}-{s}", .{
             @tagName(t.cpu_arch.?),
@@ -116,13 +135,17 @@ pub fn build(b: *std.Build) void {
     // ============================================================
     // Release build with full optimizations
     // ============================================================
-    const release_exe = b.addExecutable(.{
-        .name = "me-client",
+    const release_mod = b.createModule(.{
         .root_source_file = b.path("src/main.zig"),
         .target = target,
         .optimize = .ReleaseFast,
     });
-    release_exe.linkLibC();
+    release_mod.link_libc = true;
+
+    const release_exe = b.addExecutable(.{
+        .name = "me-client",
+        .root_module = release_mod,
+    });
 
     const release_step = b.step("release", "Build optimized release binary");
     release_step.dependOn(&b.addInstallArtifact(release_exe, .{}).step);

@@ -48,7 +48,7 @@ pub const order = order_builder.order;
 
 const Args = struct {
     host: []const u8 = "127.0.0.1",
-    port: u16 = 12345,
+    port: u16 = 1234,
     transport: Transport = .tcp,
     protocol: Protocol = .binary,
     command: Command = .help,
@@ -164,7 +164,7 @@ fn printHelp() void {
         \\
         \\CONNECTION OPTIONS:
         \\    --host <HOST>    Server host (default: 127.0.0.1)
-        \\    --port <PORT>    Server port (default: 12345)
+        \\    --port <PORT>    Server port (default: 1234)
         \\    --tcp            Use TCP transport (default)
         \\    --udp            Use UDP transport
         \\    --binary         Use binary protocol (default)
