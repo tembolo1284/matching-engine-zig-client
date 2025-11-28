@@ -40,7 +40,7 @@ fn decodeAck(data: []const u8) DecodeError!types.OutputMessage {
 
     const ack: *const types.BinaryAck = @ptrCast(@alignCast(data.ptr));
 
-    var msg = types.OutputMessage{
+    const msg = types.OutputMessage{
         .msg_type = .ack,
         .symbol = ack.symbol,
         .symbol_len = @intCast(findSymbolLen(&ack.symbol)),
@@ -56,7 +56,7 @@ fn decodeCancelAck(data: []const u8) DecodeError!types.OutputMessage {
 
     const ack: *const types.BinaryCancelAck = @ptrCast(@alignCast(data.ptr));
 
-    var msg = types.OutputMessage{
+    const msg = types.OutputMessage{
         .msg_type = .cancel_ack,
         .symbol = ack.symbol,
         .symbol_len = @intCast(findSymbolLen(&ack.symbol)),
@@ -72,7 +72,7 @@ fn decodeTrade(data: []const u8) DecodeError!types.OutputMessage {
 
     const trade: *const types.BinaryTrade = @ptrCast(@alignCast(data.ptr));
 
-    var msg = types.OutputMessage{
+    const msg = types.OutputMessage{
         .msg_type = .trade,
         .symbol = trade.symbol,
         .symbol_len = @intCast(findSymbolLen(&trade.symbol)),
@@ -92,7 +92,7 @@ fn decodeTopOfBook(data: []const u8) DecodeError!types.OutputMessage {
 
     const tob: *const types.BinaryTopOfBook = @ptrCast(@alignCast(data.ptr));
 
-    var msg = types.OutputMessage{
+    const msg = types.OutputMessage{
         .msg_type = .top_of_book,
         .symbol = tob.symbol,
         .symbol_len = @intCast(findSymbolLen(&tob.symbol)),

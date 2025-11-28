@@ -4,9 +4,6 @@ pub fn build(b: *std.Build) void {
     const target = b.standardTargetOptions(.{});
     const optimize = b.standardOptimizeOption(.{});
 
-    // ============================================================
-    // Main library module (shared by exe and examples)
-    // ============================================================
     const me_client_mod = b.createModule(.{
         .root_source_file = b.path("src/main.zig"),
         .target = target,
@@ -14,9 +11,6 @@ pub fn build(b: *std.Build) void {
     });
     me_client_mod.link_libc = true;
 
-    // ============================================================
-    // Main client executable
-    // ============================================================
     const exe = b.addExecutable(.{
         .name = "me-client",
         .root_module = me_client_mod,
@@ -24,7 +18,6 @@ pub fn build(b: *std.Build) void {
 
     b.installArtifact(exe);
 
-    // Run command: zig build run -- [args]
     const run_cmd = b.addRunArtifact(exe);
     run_cmd.step.dependOn(b.getInstallStep());
     if (b.args) |args| run_cmd.addArgs(args);
@@ -32,9 +25,6 @@ pub fn build(b: *std.Build) void {
     const run_step = b.step("run", "Run the matching engine client");
     run_step.dependOn(&run_cmd.step);
 
-    // ============================================================
-    // Unit tests
-    // ============================================================
     const unit_test_mod = b.createModule(.{
         .root_source_file = b.path("src/main.zig"),
         .target = target,
@@ -50,7 +40,6 @@ pub fn build(b: *std.Build) void {
     const test_step = b.step("test", "Run unit tests");
     test_step.dependOn(&run_unit_tests.step);
 
-    // Protocol-specific tests
     const protocol_test_mod = b.createModule(.{
         .root_source_file = b.path("tests/protocol_tests.zig"),
         .target = target,
@@ -66,9 +55,6 @@ pub fn build(b: *std.Build) void {
     const protocol_test_step = b.step("test-protocol", "Run protocol codec tests");
     protocol_test_step.dependOn(&run_protocol_tests.step);
 
-    // ============================================================
-    // Examples
-    // ============================================================
     const examples = [_]struct { name: []const u8, path: []const u8 }{
         .{ .name = "simple-order", .path = "examples/simple_order.zig" },
         .{ .name = "market-subscriber", .path = "examples/market_subscriber.zig" },
@@ -82,8 +68,6 @@ pub fn build(b: *std.Build) void {
             .optimize = optimize,
         });
         example_mod.link_libc = true;
-
-        // Add me_client as import
         example_mod.addImport("me_client", me_client_mod);
 
         const example_exe = b.addExecutable(.{
@@ -95,15 +79,18 @@ pub fn build(b: *std.Build) void {
         b.getInstallStep().dependOn(&install_example.step);
     }
 
-    // ============================================================
-    // Cross-compilation targets
-    // ============================================================
-    const cross_targets = [_]std.Target.Query{
-        .{ .cpu_arch = .x86_64, .os_tag = .linux },
-        .{ .cpu_arch = .aarch64, .os_tag = .linux },
-        .{ .cpu_arch = .x86_64, .os_tag = .macos },
-        .{ .cpu_arch = .aarch64, .os_tag = .macos },
-        .{ .cpu_arch = .x86_64, .os_tag = .windows },
+    const CrossTarget = struct {
+        cpu_arch: std.Target.Cpu.Arch,
+        os_tag: std.Target.Os.Tag,
+        name: []const u8,
+    };
+
+    const cross_targets = [_]CrossTarget{
+        .{ .cpu_arch = .x86_64, .os_tag = .linux, .name = "x86_64-linux" },
+        .{ .cpu_arch = .aarch64, .os_tag = .linux, .name = "aarch64-linux" },
+        .{ .cpu_arch = .x86_64, .os_tag = .macos, .name = "x86_64-macos" },
+        .{ .cpu_arch = .aarch64, .os_tag = .macos, .name = "aarch64-macos" },
+        .{ .cpu_arch = .x86_64, .os_tag = .windows, .name = "x86_64-windows" },
     };
 
     const cross_step = b.step("cross", "Build for all supported platforms");
@@ -111,7 +98,10 @@ pub fn build(b: *std.Build) void {
     for (cross_targets) |t| {
         const cross_mod = b.createModule(.{
             .root_source_file = b.path("src/main.zig"),
-            .target = b.resolveTargetQuery(t),
+            .target = b.resolveTargetQuery(.{
+                .cpu_arch = t.cpu_arch,
+                .os_tag = t.os_tag,
+            }),
             .optimize = .ReleaseFast,
         });
         cross_mod.link_libc = true;
@@ -121,20 +111,12 @@ pub fn build(b: *std.Build) void {
             .root_module = cross_mod,
         });
 
-        const target_name = std.fmt.comptimePrint("{s}-{s}", .{
-            @tagName(t.cpu_arch.?),
-            @tagName(t.os_tag.?),
-        });
-
         const install = b.addInstallArtifact(cross_exe, .{
-            .dest_dir = .{ .override = .{ .custom = target_name } },
+            .dest_dir = .{ .override = .{ .custom = t.name } },
         });
         cross_step.dependOn(&install.step);
     }
 
-    // ============================================================
-    // Release build with full optimizations
-    // ============================================================
     const release_mod = b.createModule(.{
         .root_source_file = b.path("src/main.zig"),
         .target = target,
