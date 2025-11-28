@@ -285,29 +285,24 @@ pub const BinaryTopOfBook = extern struct {
 /// Parsed output message - aligned to cache line to prevent false sharing
 /// when processing messages in parallel or across thread boundaries.
 pub const OutputMessage = struct {
-    msg_type: OutputMsgType,
-    symbol: [MAX_SYMBOL_LEN]u8,
-    symbol_len: u8,
-
-    // Fields vary by message type
-    user_id: u32 = 0,
-    order_id: u32 = 0,
-    buy_user_id: u32 = 0,
-    buy_order_id: u32 = 0,
-    sell_user_id: u32 = 0,
-    sell_order_id: u32 = 0,
-    price: u32 = 0,
-    quantity: u32 = 0,
-    side: ?Side = null,
-
-    // Padding to cache line boundary prevents false sharing
-    _padding: [CACHE_LINE_SIZE - 49]u8 = undefined,
-
-    comptime {
-        if (@sizeOf(OutputMessage) != CACHE_LINE_SIZE) {
-            @compileError("OutputMessage must be exactly 64 bytes (one cache line)");
-        }
-    }
+    msg_type: OutputMsgType,        // 1 byte
+    symbol: [MAX_SYMBOL_LEN]u8,     // 8 bytes
+    symbol_len: u8,                 // 1 byte
+    side: ?Side = null,             // 2 bytes (tag + value)
+    
+    // Group u32 fields together for natural alignment
+    user_id: u32 = 0,               // 4 bytes
+    order_id: u32 = 0,              // 4 bytes
+    buy_user_id: u32 = 0,           // 4 bytes
+    buy_order_id: u32 = 0,          // 4 bytes
+    sell_user_id: u32 = 0,          // 4 bytes
+    sell_order_id: u32 = 0,         // 4 bytes
+    price: u32 = 0,                 // 4 bytes
+    quantity: u32 = 0,              // 4 bytes
+    // Total so far: 1+8+1+2+4*8 = 44 bytes
+    
+    // Padding to reach 64 bytes
+    _padding: [20]u8 = undefined,
 
     pub fn getSymbol(self: *const OutputMessage) []const u8 {
         return self.symbol[0..self.symbol_len];

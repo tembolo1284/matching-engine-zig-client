@@ -12,8 +12,7 @@ pub const Timestamp = u64;
 /// Get current timestamp in nanoseconds.
 /// Uses the most efficient method available per platform.
 pub fn now() Timestamp {
-    const ts = std.time.Instant.now() catch return 0;
-    return @intCast(ts.timestamp);
+    return @intCast(std.time.nanoTimestamp());
 }
 
 /// Get elapsed time since a previous timestamp in nanoseconds.

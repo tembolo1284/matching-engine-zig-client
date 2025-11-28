@@ -8,7 +8,7 @@ const me = @import("me_client");
 
 const Config = struct {
     host: []const u8 = "127.0.0.1",
-    port: u16 = 1234,
+    port: u16 = 12345,
     transport: me.Transport = .tcp,
     protocol: me.Protocol = .binary,
     iterations: u32 = 10000,
@@ -115,8 +115,8 @@ pub fn main() !void {
     try stdout.print("  Avg:    {d} ns\n", .{send_tracker.avgNs()});
     try stdout.print("  Max:    {d} ns\n", .{send_tracker.maxNs()});
 
-    const throughput = if (total_time > 0)
-        config.iterations * 1_000_000_000 / total_time
+    const throughput: u64 = if (total_time > 0)
+        @as(u64, config.iterations) * 1_000_000_000 / total_time
     else
         0;
 

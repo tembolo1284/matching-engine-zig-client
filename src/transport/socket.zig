@@ -52,10 +52,10 @@ pub const Address = struct {
     len: std.posix.socklen_t,
 
     pub fn initIpv4(ip: [4]u8, port: u16) Address {
-        var addr = std.net.Address.initIp4(ip, port);
+        const addr = std.net.Address.initIp4(ip, port);
         return .{
             .inner = addr.any,
-            .len = addr.getLen(),
+            .len = @sizeOf(std.posix.sockaddr_in),
         };
     }
 
@@ -156,10 +156,13 @@ pub const UdpSocket = struct {
             .interface = .{ 0, 0, 0, 0 },
         };
 
+        // IP_ADD_MEMBERSHIP = 12 on most platforms
+        const IP_ADD_MEMBERSHIP = 12;
+        
         std.posix.setsockopt(
             self.handle,
             std.posix.IPPROTO.IP,
-            std.posix.IP.ADD_MEMBERSHIP,
+            IP_ADD_MEMBERSHIP,
             std.mem.asBytes(&mreq),
         ) catch |err| return translateError(err);
     }

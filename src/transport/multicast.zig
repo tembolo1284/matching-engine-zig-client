@@ -43,8 +43,10 @@ pub const MulticastSubscriber = struct {
     /// Receive and parse the next market data message.
     /// Blocks until data is available.
     pub fn recvMessage(self: *Self) !types.OutputMessage {
-        const data = try self.sock.recv(&self.recv_buf);
+        const bytes_read = try self.sock.recv(&self.recv_buf);
         self.packets_received += 1;
+        
+        const data = self.recv_buf[0..bytes_read];
 
         // Auto-detect protocol and parse
         if (binary.isBinaryProtocol(data)) {
