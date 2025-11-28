@@ -1,0 +1,17 @@
+{
+  "version": "0.2.0",
+  "configurations": [
+    {
+      "name": "Run matching-engine-zig-client",
+      "type": "cppvsdbg",
+      "request": "launch",
+      "program": "${workspaceFolder}/zig-out/bin/matching-engine-zig-client.exe",
+      "args": [],
+      "cwd": "${workspaceFolder}",
+      "preLaunchTask": "zig: build",
+      "console": "integratedTerminal",
+      "stopAtEntry": false
+    }
+  ]
+}
+
