@@ -50,8 +50,8 @@ pub const order = order_builder.order;
 const Args = struct {
     host: []const u8 = "127.0.0.1",
     port: u16 = 1234,
-    transport: Transport = .tcp,
-    protocol: Protocol = .csv,
+    transport: Transport = .auto,  // Auto-detect by default
+    protocol: Protocol = .auto,    // Auto-detect by default
     command: Command = .interactive,
 
     // Scenario number (1, 2, 3, or 0 for interactive)
@@ -171,13 +171,18 @@ fn printHelp() void {
         \\  scenario  Test scenario number, or 'i' for interactive (default)
         \\
         \\Options:
-        \\  --tcp     Use TCP transport (default)
-        \\  --udp     Use UDP transport (for UDP-mode server)
-        \\  --binary  Use binary protocol
-        \\  --csv     Use CSV protocol (default)
+        \\  --tcp     Force TCP transport (auto-detects by default)
+        \\  --udp     Force UDP transport
+        \\  --binary  Force binary protocol (auto-detects by default)
+        \\  --csv     Force CSV protocol
         \\  --host    Server host
         \\  --port    Server port
         \\  -h, --help Show this help
+        \\
+        \\Auto-Detection:
+        \\  By default, the client auto-detects transport and protocol:
+        \\  1. Tries TCP first, falls back to UDP if TCP fails
+        \\  2. Sends probe to detect CSV vs Binary protocol
         \\
         \\Basic Scenarios:
         \\  1  - Simple orders (buy + sell at different prices + flush)
@@ -185,38 +190,29 @@ fn printHelp() void {
         \\  3  - Cancel order
         \\
         \\Stress Test Scenarios:
-        \\  10 - Stress test: 1K orders (book building)
+        \\  10 - Stress test: 1K orders
         \\  11 - Stress test: 10K orders
         \\  12 - Stress test: 100K orders
         \\  13 - Stress test: 1M orders
+        \\  14 - Stress test: 10M orders  ** EXTREME **
         \\  20 - Matching stress: 1K trade pairs
         \\  21 - Matching stress: 10K trade pairs
-        \\  30 - Multi-symbol stress: 10K orders across 10 symbols
-        \\
-        \\Commands:
-        \\  me-client subscribe <group> <port>  - Subscribe to multicast market data
-        \\  me-client benchmark                 - Run latency benchmark
+        \\  30 - Multi-symbol stress: 10K orders
+        \\  40 - Burst mode: 100K (no throttling)
+        \\  41 - Burst mode: 1M (no throttling)
         \\
         \\Examples:
-        \\  me-client localhost 1234 1          # Run scenario 1 (TCP)
-        \\  me-client localhost 1234            # Interactive mode (TCP)
-        \\  me-client localhost 1234 11         # 10K order stress test
-        \\  me-client --udp localhost 1234 11   # 10K stress test (UDP)
-        \\  me-client                           # Connect to 127.0.0.1:1234 (TCP)
-        \\  me-client subscribe 239.255.0.1 5000  # Multicast subscriber
+        \\  me-client localhost 1234            # Auto-detect, interactive
+        \\  me-client localhost 1234 1          # Auto-detect, scenario 1
+        \\  me-client --tcp localhost 1234      # Force TCP
+        \\  me-client --udp localhost 1234      # Force UDP
         \\
         \\Interactive Commands:
-        \\  buy SYMBOL PRICE QTY [ORDER_ID]    - Send buy order
-        \\  sell SYMBOL PRICE QTY [ORDER_ID]   - Send sell order  
-        \\  cancel ORDER_ID                    - Cancel order
-        \\  flush                              - Cancel all orders
-        \\  quit / exit                        - Disconnect
-        \\
-        \\Interactive Examples:
-        \\  > buy IBM 100 50
-        \\  > sell IBM 100 50 
-        \\  > cancel 1
-        \\  > flush
+        \\  buy SYMBOL PRICE QTY [ORDER_ID]
+        \\  sell SYMBOL PRICE QTY [ORDER_ID]
+        \\  cancel ORDER_ID
+        \\  flush
+        \\  quit / exit
         \\
     ;
     stderr.print("{s}", .{help}) catch {};
@@ -230,7 +226,12 @@ fn runInteractive(args: Args) !void {
     const stderr = std.io.getStdErr().writer();
     const stdin = std.io.getStdIn().reader();
 
-    try stderr.print("Connecting to {s}:{d}...\n", .{ args.host, args.port });
+    // Show what we're trying
+    if (args.transport == .auto) {
+        try stderr.print("Auto-detecting server at {s}:{d}...\n", .{ args.host, args.port });
+    } else {
+        try stderr.print("Connecting to {s}:{d}...\n", .{ args.host, args.port });
+    }
 
     var client = EngineClient.init(.{
         .host = args.host,
@@ -243,12 +244,29 @@ fn runInteractive(args: Args) !void {
     };
     defer client.deinit();
 
-    try stderr.print("Connected to {s}:{d} ({s}/{s})\n\n", .{
+    // Show what we detected/connected with
+    const transport_str = switch (client.getTransport()) {
+        .tcp => "tcp",
+        .udp => "udp",
+        .auto => "auto",
+    };
+    const protocol_str = switch (client.getProtocol()) {
+        .csv => "csv",
+        .binary => "binary",
+        .auto => "auto",
+    };
+
+    try stderr.print("Connected to {s}:{d} ({s}/{s})\n", .{
         args.host,
         args.port,
-        @tagName(args.transport),
-        @tagName(args.protocol),
+        transport_str,
+        protocol_str,
     });
+
+    if (args.transport == .auto or args.protocol == .auto) {
+        try stderr.print("(auto-detected)\n", .{});
+    }
+    try stderr.print("\n", .{});
 
     try stderr.print("=== Interactive Mode ===\n", .{});
     try stderr.print("Commands:\n", .{});
@@ -395,8 +413,9 @@ fn recvAndPrintResponses(client: *EngineClient, stderr: anytype) !void {
                 break;
             };
 
-            // Parse the response based on protocol
-            if (client.config.protocol == .binary) {
+            // Parse the response based on detected protocol
+            const proto = client.getProtocol();
+            if (proto == .binary) {
                 if (binary.isBinaryProtocol(raw_data)) {
                     const msg = binary.decodeOutput(raw_data) catch |err| {
                         try stderr.print("[Parse error: {s}]\n", .{@errorName(err)});
@@ -409,7 +428,7 @@ fn recvAndPrintResponses(client: *EngineClient, stderr: anytype) !void {
                     try stderr.print("[RECV] {s}\n", .{raw_data});
                 }
             } else {
-                // CSV protocol - parse or just print raw
+                // CSV protocol (or auto) - parse or just print raw
                 const msg = csv.parseOutput(raw_data) catch {
                     // Just print raw if parse fails
                     try stderr.print("[RECV] {s}", .{raw_data});
@@ -481,7 +500,12 @@ fn printResponse(msg: OutputMessage, stderr: anytype) !void {
 fn runScenario(args: Args) !void {
     const stderr = std.io.getStdErr().writer();
 
-    try stderr.print("Connecting to {s}:{d}...\n", .{ args.host, args.port });
+    // Show what we're trying
+    if (args.transport == .auto) {
+        try stderr.print("Auto-detecting server at {s}:{d}...\n", .{ args.host, args.port });
+    } else {
+        try stderr.print("Connecting to {s}:{d}...\n", .{ args.host, args.port });
+    }
 
     var client = EngineClient.init(.{
         .host = args.host,
@@ -494,7 +518,23 @@ fn runScenario(args: Args) !void {
     };
     defer client.deinit();
 
-    try stderr.print("Connected.\n\n", .{});
+    // Show what we detected/connected with
+    const transport_str = switch (client.getTransport()) {
+        .tcp => "tcp",
+        .udp => "udp",
+        .auto => "auto",
+    };
+    const protocol_str = switch (client.getProtocol()) {
+        .csv => "csv",
+        .binary => "binary",
+        .auto => "auto",
+    };
+
+    try stderr.print("Connected ({s}/{s})", .{ transport_str, protocol_str });
+    if (args.transport == .auto or args.protocol == .auto) {
+        try stderr.print(" [auto-detected]", .{});
+    }
+    try stderr.print("\n\n", .{});
 
     scenarios.run(&client, args.scenario, stderr) catch |err| {
         if (err == error.UnknownScenario) {

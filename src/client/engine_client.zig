@@ -17,6 +17,8 @@ pub const Protocol = enum {
     binary,
     /// Human-readable CSV - easier debugging
     csv,
+    /// Auto-detect from server response
+    auto,
 };
 
 /// Transport mode
@@ -25,14 +27,22 @@ pub const Transport = enum {
     tcp,
     /// Fire-and-forget, lowest latency
     udp,
+    /// Auto-detect: try TCP first, then UDP
+    auto,
 };
 
 /// Client configuration
 pub const Config = struct {
     host: []const u8 = "127.0.0.1",
-    port: u16 = 12345,
-    transport: Transport = .tcp,
-    protocol: Protocol = .binary,
+    port: u16 = 1234,
+    transport: Transport = .auto,
+    protocol: Protocol = .auto,
+};
+
+/// Discovery result
+pub const DiscoveryResult = struct {
+    transport: Transport,
+    protocol: Protocol,
 };
 
 /// Unified matching engine client
@@ -41,23 +51,100 @@ pub const EngineClient = struct {
     tcp_client: ?tcp.TcpClient = null,
     udp_client: ?udp.UdpClient = null,
     send_buf: [types.MAX_CSV_LEN]u8 = undefined,
+    detected_transport: Transport = .tcp,
+    detected_protocol: Protocol = .csv,
 
     const Self = @This();
 
-    /// Create and connect a new client
+    /// Create and connect a new client (with optional auto-discovery)
     pub fn init(config: Config) !Self {
         var client = Self{ .config = config };
 
-        switch (config.transport) {
-            .tcp => {
-                client.tcp_client = try tcp.TcpClient.connect(config.host, config.port);
-            },
-            .udp => {
+        // Handle transport
+        const transport = if (config.transport == .auto) blk: {
+            // Try TCP first
+            if (tcp.TcpClient.connect(config.host, config.port)) |tcp_conn| {
+                client.tcp_client = tcp_conn;
+                client.detected_transport = .tcp;
+                break :blk Transport.tcp;
+            } else |_| {
+                // TCP failed, try UDP (UDP always "succeeds" as it's connectionless)
                 client.udp_client = try udp.UdpClient.init(config.host, config.port);
-            },
+                client.detected_transport = .udp;
+                break :blk Transport.udp;
+            }
+        } else config.transport;
+
+        // Connect if not already connected during auto-discovery
+        if (config.transport != .auto) {
+            switch (transport) {
+                .tcp => {
+                    client.tcp_client = try tcp.TcpClient.connect(config.host, config.port);
+                    client.detected_transport = .tcp;
+                },
+                .udp => {
+                    client.udp_client = try udp.UdpClient.init(config.host, config.port);
+                    client.detected_transport = .udp;
+                },
+                .auto => unreachable,
+            }
         }
 
+        // Handle protocol detection
+        if (config.protocol == .auto) {
+            client.detected_protocol = try client.detectProtocol();
+        } else {
+            client.detected_protocol = if (config.protocol == .auto) .csv else config.protocol;
+        }
+
+        // Update config with detected values
+        client.config.transport = client.detected_transport;
+        client.config.protocol = client.detected_protocol;
+
         return client;
+    }
+
+    /// Detect protocol by sending a flush and examining response
+    fn detectProtocol(self: *Self) !Protocol {
+        // Only works with TCP (we get responses back)
+        if (self.tcp_client == null) {
+            // UDP doesn't send responses back to client, default to CSV
+            return .csv;
+        }
+
+        // Send a flush command (CSV format - universally accepted)
+        const flush_csv = "F\n";
+        self.tcp_client.?.send(flush_csv) catch {
+            // If send fails, default to CSV
+            return .csv;
+        };
+
+        // Wait a bit for response
+        std.time.sleep(100 * std.time.ns_per_ms);
+
+        // Try to receive response
+        const response = self.tcp_client.?.recv() catch {
+            // No response or timeout - default to CSV
+            return .csv;
+        };
+
+        // Check if response looks like binary
+        if (response.len > 0 and binary.isBinaryProtocol(response)) {
+            return .binary;
+        }
+
+        // Default to CSV
+        return .csv;
+    }
+
+    /// Get the detected/configured transport
+    pub fn getTransport(self: *const Self) Transport {
+        return self.detected_transport;
+    }
+
+    /// Get the detected/configured protocol
+    pub fn getProtocol(self: *const Self) Protocol {
+        return self.detected_protocol;
     }
 
     /// Send a new order
@@ -73,7 +160,8 @@ pub const EngineClient = struct {
         std.debug.assert(symbol.len > 0 and symbol.len <= types.MAX_SYMBOL_LEN);
         std.debug.assert(quantity > 0);
 
-        const data = switch (self.config.protocol) {
+        const proto = self.detected_protocol;
+        const data = switch (proto) {
             .binary => blk: {
                 const msg = types.BinaryNewOrder.init(
                     user_id,
@@ -85,7 +173,7 @@ pub const EngineClient = struct {
                 );
                 break :blk msg.asBytes();
             },
-            .csv => blk: {
+            .csv, .auto => blk: {
                 const result = try csv.formatNewOrder(
                     &self.send_buf,
                     user_id,
@@ -104,12 +192,13 @@ pub const EngineClient = struct {
 
     /// Send a cancel order request
     pub fn sendCancel(self: *Self, user_id: u32, order_id: u32) !void {
-        const data = switch (self.config.protocol) {
+        const proto = self.detected_protocol;
+        const data = switch (proto) {
             .binary => blk: {
                 const msg = types.BinaryCancel.init(user_id, order_id);
                 break :blk msg.asBytes();
             },
-            .csv => blk: {
+            .csv, .auto => blk: {
                 const result = try csv.formatCancel(&self.send_buf, user_id, order_id);
                 break :blk result;
             },
@@ -120,12 +209,13 @@ pub const EngineClient = struct {
 
     /// Send a flush command (cancel all orders)
     pub fn sendFlush(self: *Self) !void {
-        const data = switch (self.config.protocol) {
+        const proto = self.detected_protocol;
+        const data = switch (proto) {
             .binary => blk: {
                 const msg = types.BinaryFlush{};
                 break :blk msg.asBytes();
             },
-            .csv => blk: {
+            .csv, .auto => blk: {
                 const result = try csv.formatFlush(&self.send_buf);
                 break :blk result;
             },
