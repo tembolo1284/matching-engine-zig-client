@@ -313,7 +313,7 @@ test "EngineClient struct size" {
 test "Config defaults" {
     const config = Config{};
     try std.testing.expectEqualStrings("127.0.0.1", config.host);
-    try std.testing.expectEqual(@as(u16, 12345), config.port);
-    try std.testing.expectEqual(Transport.tcp, config.transport);
-    try std.testing.expectEqual(Protocol.binary, config.protocol);
+    try std.testing.expectEqual(@as(u16, 1234), config.port);
+    try std.testing.expectEqual(Transport.auto, config.transport);
+    try std.testing.expectEqual(Protocol.auto, config.protocol);
 }

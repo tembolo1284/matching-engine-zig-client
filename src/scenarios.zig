@@ -192,8 +192,10 @@ fn runStressTest(client: *EngineClient, stderr: anytype, count: u32) !void {
             continue;
         };
 
-        const latency = timestamp.now() - order_start;
-        total_latency += latency;
+        const order_end = timestamp.now();
+        // Use saturating subtraction to prevent overflow
+        const latency = if (order_end >= order_start) order_end - order_start else 0;
+        total_latency +|= latency; // Saturating add
         if (latency < min_latency) min_latency = latency;
         if (latency > max_latency) max_latency = latency;
 
@@ -212,7 +214,8 @@ fn runStressTest(client: *EngineClient, stderr: anytype, count: u32) !void {
         }
     }
 
-    const total_time = timestamp.now() - start_time;
+    const end_time = timestamp.now();
+    const total_time = if (end_time >= start_time) end_time - start_time else 0;
 
     // Print results
     try stderr.print("\n=== Results ===\n", .{});
@@ -294,7 +297,8 @@ fn runMatchingStress(client: *EngineClient, stderr: anytype, pairs: u32) !void {
         }
     }
 
-    const total_time = timestamp.now() - start_time;
+    const end_time = timestamp.now();
+    const total_time = if (end_time >= start_time) end_time - start_time else 0;
     const orders_sent = (pairs * 2) - send_errors;
 
     try stderr.print("\n=== Results ===\n", .{});
@@ -355,7 +359,8 @@ fn runMultiSymbolStress(client: *EngineClient, stderr: anytype, count: u32) !voi
         }
     }
 
-    const total_time = timestamp.now() - start_time;
+    const end_time = timestamp.now();
+    const total_time = if (end_time >= start_time) end_time - start_time else 0;
 
     try stderr.print("\n=== Results ===\n", .{});
     try stderr.print("Orders sent:     {d}\n", .{count - send_errors});
@@ -422,8 +427,10 @@ fn runBurstStress(client: *EngineClient, stderr: anytype, count: u32) !void {
             continue;
         };
 
-        const latency = timestamp.now() - order_start;
-        total_latency += latency;
+        const order_end = timestamp.now();
+        // Use saturating subtraction to prevent overflow
+        const latency = if (order_end >= order_start) order_end - order_start else 0;
+        total_latency +|= latency; // Saturating add
         if (latency < min_latency) min_latency = latency;
         if (latency > max_latency) max_latency = latency;
 
@@ -434,7 +441,8 @@ fn runBurstStress(client: *EngineClient, stderr: anytype, count: u32) !void {
         }
     }
 
-    const total_time = timestamp.now() - start_time;
+    const end_time = timestamp.now();
+    const total_time = if (end_time >= start_time) end_time - start_time else 0;
 
     // Print results
     try stderr.print("\n=== BURST Results ===\n", .{});
