@@ -23,6 +23,7 @@ pub const pool = @import("memory/pool.zig");
 pub const ring_buffer = @import("memory/ring_buffer.zig");
 
 pub const timestamp = @import("util/timestamp.zig");
+pub const scenarios = @import("scenarios.zig");
 
 // Convenience re-exports
 pub const EngineClient = engine_client.EngineClient;
@@ -48,18 +49,13 @@ pub const order = order_builder.order;
 
 const Args = struct {
     host: []const u8 = "127.0.0.1",
-    port: u16 = 12345,
+    port: u16 = 1234,
     transport: Transport = .tcp,
-    protocol: Protocol = .binary,
-    command: Command = .help,
+    protocol: Protocol = .csv,
+    command: Command = .interactive,
 
-    // Command-specific args
-    user_id: u32 = 1,
-    symbol: []const u8 = "IBM",
-    price: u32 = 10000,
-    quantity: u32 = 100,
-    side: Side = .buy,
-    order_id: u32 = 1,
+    // Scenario number (1, 2, 3, or 0 for interactive)
+    scenario: u8 = 0,
 
     // Multicast args
     multicast_group: []const u8 = "239.255.0.1",
@@ -67,43 +63,36 @@ const Args = struct {
 
 const Command = enum {
     help,
-    send_order,
-    send_cancel,
-    send_flush,
+    interactive,
+    scenario,
     subscribe,
     benchmark,
 };
 
 pub fn main() !void {
-    var gpa = std.heap.GeneralPurposeAllocator(.{}){};
-    defer _ = gpa.deinit();
-
-    const args = try parseArgs();
+    const args = parseArgs();
 
     switch (args.command) {
         .help => printHelp(),
-        .send_order => try runSendOrder(args),
-        .send_cancel => try runSendCancel(args),
-        .send_flush => try runSendFlush(args),
+        .interactive => try runInteractive(args),
+        .scenario => try runScenario(args),
         .subscribe => try runSubscribe(args),
         .benchmark => try runBenchmark(args),
     }
 }
 
-fn parseArgs() !Args {
+fn parseArgs() Args {
     var args = Args{};
     var iter = std.process.args();
 
     _ = iter.next(); // Skip program name
 
+    var positional_index: u8 = 0; // Track which positional arg we're on
+
     while (iter.next()) |arg| {
         if (std.mem.eql(u8, arg, "--help") or std.mem.eql(u8, arg, "-h")) {
             args.command = .help;
-        } else if (std.mem.eql(u8, arg, "--host")) {
-            args.host = iter.next() orelse return error.MissingArgument;
-        } else if (std.mem.eql(u8, arg, "--port") or std.mem.eql(u8, arg, "-p")) {
-            const port_str = iter.next() orelse return error.MissingArgument;
-            args.port = std.fmt.parseInt(u16, port_str, 10) catch return error.InvalidPort;
+            return args;
         } else if (std.mem.eql(u8, arg, "--tcp")) {
             args.transport = .tcp;
         } else if (std.mem.eql(u8, arg, "--udp")) {
@@ -112,36 +101,57 @@ fn parseArgs() !Args {
             args.protocol = .binary;
         } else if (std.mem.eql(u8, arg, "--csv")) {
             args.protocol = .csv;
-        } else if (std.mem.eql(u8, arg, "order")) {
-            args.command = .send_order;
-        } else if (std.mem.eql(u8, arg, "cancel")) {
-            args.command = .send_cancel;
-        } else if (std.mem.eql(u8, arg, "flush")) {
-            args.command = .send_flush;
         } else if (std.mem.eql(u8, arg, "subscribe")) {
             args.command = .subscribe;
+            // Parse multicast group and port from remaining args
+            if (iter.next()) |group| {
+                args.multicast_group = group;
+            }
+            if (iter.next()) |port_str| {
+                args.port = std.fmt.parseInt(u16, port_str, 10) catch 5000;
+            }
+            return args;
         } else if (std.mem.eql(u8, arg, "benchmark")) {
             args.command = .benchmark;
-        } else if (std.mem.eql(u8, arg, "--symbol") or std.mem.eql(u8, arg, "-s")) {
-            args.symbol = iter.next() orelse return error.MissingArgument;
-        } else if (std.mem.eql(u8, arg, "--price")) {
-            const price_str = iter.next() orelse return error.MissingArgument;
-            args.price = std.fmt.parseInt(u32, price_str, 10) catch return error.InvalidPrice;
-        } else if (std.mem.eql(u8, arg, "--qty") or std.mem.eql(u8, arg, "-q")) {
-            const qty_str = iter.next() orelse return error.MissingArgument;
-            args.quantity = std.fmt.parseInt(u32, qty_str, 10) catch return error.InvalidQuantity;
-        } else if (std.mem.eql(u8, arg, "--buy") or std.mem.eql(u8, arg, "-b")) {
-            args.side = .buy;
-        } else if (std.mem.eql(u8, arg, "--sell")) {
-            args.side = .sell;
-        } else if (std.mem.eql(u8, arg, "--user")) {
-            const user_str = iter.next() orelse return error.MissingArgument;
-            args.user_id = std.fmt.parseInt(u32, user_str, 10) catch return error.InvalidUserId;
-        } else if (std.mem.eql(u8, arg, "--order-id")) {
-            const oid_str = iter.next() orelse return error.MissingArgument;
-            args.order_id = std.fmt.parseInt(u32, oid_str, 10) catch return error.InvalidOrderId;
-        } else if (std.mem.eql(u8, arg, "--group")) {
-            args.multicast_group = iter.next() orelse return error.MissingArgument;
+        } else if (std.mem.eql(u8, arg, "--host")) {
+            if (iter.next()) |host| {
+                args.host = host;
+            }
+        } else if (std.mem.eql(u8, arg, "--port") or std.mem.eql(u8, arg, "-p")) {
+            if (iter.next()) |port_str| {
+                args.port = std.fmt.parseInt(u16, port_str, 10) catch 1234;
+            }
+        } else if (arg[0] != '-') {
+            // Positional arguments: [host] [port] [scenario]
+            if (positional_index == 0) {
+                // First positional: host (or could be just scenario if only one arg)
+                if (std.fmt.parseInt(u16, arg, 10)) |_| {
+                    // It's a number - if only arg, treat as scenario
+                    // But we don't know yet, so treat as host for now
+                    args.host = arg;
+                } else |_| {
+                    // Not a number - definitely host
+                    if (std.mem.eql(u8, arg, "i") or std.mem.eql(u8, arg, "interactive")) {
+                        args.command = .interactive;
+                    } else {
+                        args.host = arg;
+                    }
+                }
+                positional_index += 1;
+            } else if (positional_index == 1) {
+                // Second positional: port
+                args.port = std.fmt.parseInt(u16, arg, 10) catch 1234;
+                positional_index += 1;
+            } else if (positional_index == 2) {
+                // Third positional: scenario
+                if (std.mem.eql(u8, arg, "i") or std.mem.eql(u8, arg, "interactive")) {
+                    args.command = .interactive;
+                } else if (std.fmt.parseInt(u8, arg, 10)) |scenario| {
+                    args.scenario = scenario;
+                    args.command = .scenario;
+                } else |_| {}
+                positional_index += 1;
+            }
         }
     }
 
@@ -149,180 +159,413 @@ fn parseArgs() !Args {
 }
 
 fn printHelp() void {
+    const stderr = std.io.getStdErr().writer();
     const help =
         \\Matching Engine Zig Client
         \\
-        \\USAGE:
-        \\    me-client [OPTIONS] <COMMAND>
+        \\Usage: me-client [OPTIONS] [host] [port] [scenario]
         \\
-        \\COMMANDS:
-        \\    order       Send a new order
-        \\    cancel      Cancel an order
-        \\    flush       Cancel all orders
-        \\    subscribe   Subscribe to multicast market data
-        \\    benchmark   Run latency benchmark
+        \\Arguments:
+        \\  host      Server host (default: 127.0.0.1)
+        \\  port      Server port (default: 1234)
+        \\  scenario  Test scenario number, or 'i' for interactive (default)
         \\
-        \\CONNECTION OPTIONS:
-        \\    --host <HOST>    Server host (default: 127.0.0.1)
-        \\    --port <PORT>    Server port (default: 12345)
-        \\    --tcp            Use TCP transport (default)
-        \\    --udp            Use UDP transport
-        \\    --binary         Use binary protocol (default)
-        \\    --csv            Use CSV protocol
+        \\Options:
+        \\  --tcp     Use TCP transport (default)
+        \\  --udp     Use UDP transport (for UDP-mode server)
+        \\  --binary  Use binary protocol
+        \\  --csv     Use CSV protocol (default)
+        \\  --host    Server host
+        \\  --port    Server port
+        \\  -h, --help Show this help
         \\
-        \\ORDER OPTIONS:
-        \\    --symbol <SYM>   Symbol (default: IBM)
-        \\    --price <PRICE>  Price in cents (default: 10000)
-        \\    --qty <QTY>      Quantity (default: 100)
-        \\    --buy            Buy side (default)
-        \\    --sell           Sell side
-        \\    --user <ID>      User ID (default: 1)
-        \\    --order-id <ID>  Order ID (default: 1)
+        \\Basic Scenarios:
+        \\  1  - Simple orders (buy + sell at different prices + flush)
+        \\  2  - Matching trade (buy + sell at same price)
+        \\  3  - Cancel order
         \\
-        \\MULTICAST OPTIONS:
-        \\    --group <ADDR>   Multicast group (default: 239.255.0.1)
+        \\Stress Test Scenarios:
+        \\  10 - Stress test: 1K orders (book building)
+        \\  11 - Stress test: 10K orders
+        \\  12 - Stress test: 100K orders
+        \\  13 - Stress test: 1M orders
+        \\  20 - Matching stress: 1K trade pairs
+        \\  21 - Matching stress: 10K trade pairs
+        \\  30 - Multi-symbol stress: 10K orders across 10 symbols
         \\
-        \\EXAMPLES:
-        \\    me-client order --symbol AAPL --price 15000 --qty 50 --buy
-        \\    me-client cancel --user 1 --order-id 1001
-        \\    me-client subscribe --group 239.255.0.1 --port 5000
-        \\    me-client benchmark --tcp --binary
+        \\Commands:
+        \\  me-client subscribe <group> <port>  - Subscribe to multicast market data
+        \\  me-client benchmark                 - Run latency benchmark
+        \\
+        \\Examples:
+        \\  me-client localhost 1234 1          # Run scenario 1 (TCP)
+        \\  me-client localhost 1234            # Interactive mode (TCP)
+        \\  me-client localhost 1234 11         # 10K order stress test
+        \\  me-client --udp localhost 1234 11   # 10K stress test (UDP)
+        \\  me-client                           # Connect to 127.0.0.1:1234 (TCP)
+        \\  me-client subscribe 239.255.0.1 5000  # Multicast subscriber
+        \\
+        \\Interactive Commands:
+        \\  buy SYMBOL PRICE QTY [ORDER_ID]    - Send buy order
+        \\  sell SYMBOL PRICE QTY [ORDER_ID]   - Send sell order  
+        \\  cancel ORDER_ID                    - Cancel order
+        \\  flush                              - Cancel all orders
+        \\  quit / exit                        - Disconnect
+        \\
+        \\Interactive Examples:
+        \\  > buy IBM 100 50
+        \\  > sell IBM 100 50 
+        \\  > cancel 1
+        \\  > flush
         \\
     ;
-    std.debug.print("{s}", .{help});
+    stderr.print("{s}", .{help}) catch {};
 }
 
-fn runSendOrder(args: Args) !void {
-    const stdout = std.io.getStdOut().writer();
+// ============================================================
+// Interactive Mode (like tcp_client.c)
+// ============================================================
 
-    try stdout.print("Connecting to {s}:{d} ({s}/{s})...\n", .{
+fn runInteractive(args: Args) !void {
+    const stderr = std.io.getStdErr().writer();
+    const stdin = std.io.getStdIn().reader();
+
+    try stderr.print("Connecting to {s}:{d}...\n", .{ args.host, args.port });
+
+    var client = EngineClient.init(.{
+        .host = args.host,
+        .port = args.port,
+        .transport = args.transport,
+        .protocol = args.protocol,
+    }) catch |err| {
+        try stderr.print("Connection failed: {s}\n", .{@errorName(err)});
+        return;
+    };
+    defer client.deinit();
+
+    try stderr.print("Connected to {s}:{d} ({s}/{s})\n\n", .{
         args.host,
         args.port,
         @tagName(args.transport),
         @tagName(args.protocol),
     });
 
-    var client = try EngineClient.init(.{
-        .host = args.host,
-        .port = args.port,
-        .transport = args.transport,
-        .protocol = args.protocol,
-    });
-    defer client.deinit();
+    try stderr.print("=== Interactive Mode ===\n", .{});
+    try stderr.print("Commands:\n", .{});
+    try stderr.print("  buy SYMBOL PRICE QTY [ORDER_ID]\n", .{});
+    try stderr.print("  sell SYMBOL PRICE QTY [ORDER_ID]\n", .{});
+    try stderr.print("  cancel ORDER_ID\n", .{});
+    try stderr.print("  flush\n", .{});
+    try stderr.print("  quit\n\n", .{});
 
-    try stdout.print("Sending order: {s} {s} {d}@{d} (user={d}, oid={d})\n", .{
-        @tagName(args.side),
-        args.symbol,
-        args.quantity,
-        args.price,
-        args.user_id,
-        args.order_id,
-    });
+    var line_buf: [1024]u8 = undefined;
+    var order_id: u32 = 1;
 
-    try client.sendNewOrder(
-        args.user_id,
-        args.symbol,
-        args.price,
-        args.quantity,
-        args.side,
-        args.order_id,
-    );
+    while (true) {
+        try stderr.print("> ", .{});
 
-    try stdout.print("Order sent.\n", .{});
+        const line = stdin.readUntilDelimiterOrEof(&line_buf, '\n') catch |err| {
+            try stderr.print("Read error: {s}\n", .{@errorName(err)});
+            break;
+        } orelse break;
 
-    // Try to receive response (TCP only)
-    if (args.transport == .tcp) {
-        try stdout.print("Waiting for response...\n", .{});
-        const response = client.recv() catch |err| {
-            try stdout.print("No response (error: {s})\n", .{@errorName(err)});
-            return;
-        };
+        // Trim whitespace
+        const trimmed = std.mem.trim(u8, line, " \t\r\n");
+        if (trimmed.len == 0) continue;
 
-        var buf: [256]u8 = undefined;
-        const formatted = binary.formatOutput(&response, &buf);
-        try stdout.print("Response: {s}\n", .{formatted});
+        // Parse command
+        if (std.mem.eql(u8, trimmed, "quit") or std.mem.eql(u8, trimmed, "exit")) {
+            break;
+        } else if (std.mem.eql(u8, trimmed, "flush") or std.mem.eql(u8, trimmed, "F")) {
+            try stderr.print("→ FLUSH\n", .{});
+            client.sendFlush() catch |err| {
+                try stderr.print("Send error: {s}\n", .{@errorName(err)});
+                continue;
+            };
+            try recvAndPrintResponses(&client, stderr);
+        } else if (std.mem.startsWith(u8, trimmed, "buy ")) {
+            if (parseBuySell(trimmed[4..], &order_id)) |parsed| {
+                try stderr.print("→ BUY {s} {d}@{d} (order {d})\n", .{
+                    parsed.symbol,
+                    parsed.qty,
+                    parsed.price,
+                    parsed.order_id,
+                });
+                client.sendNewOrder(1, parsed.symbol, parsed.price, parsed.qty, .buy, parsed.order_id) catch |err| {
+                    try stderr.print("Send error: {s}\n", .{@errorName(err)});
+                    continue;
+                };
+                try recvAndPrintResponses(&client, stderr);
+            } else {
+                try stderr.print("Usage: buy SYMBOL PRICE QTY [ORDER_ID]\n", .{});
+            }
+        } else if (std.mem.startsWith(u8, trimmed, "sell ")) {
+            if (parseBuySell(trimmed[5..], &order_id)) |parsed| {
+                try stderr.print("→ SELL {s} {d}@{d} (order {d})\n", .{
+                    parsed.symbol,
+                    parsed.qty,
+                    parsed.price,
+                    parsed.order_id,
+                });
+                client.sendNewOrder(1, parsed.symbol, parsed.price, parsed.qty, .sell, parsed.order_id) catch |err| {
+                    try stderr.print("Send error: {s}\n", .{@errorName(err)});
+                    continue;
+                };
+                try recvAndPrintResponses(&client, stderr);
+            } else {
+                try stderr.print("Usage: sell SYMBOL PRICE QTY [ORDER_ID]\n", .{});
+            }
+        } else if (std.mem.startsWith(u8, trimmed, "cancel ")) {
+            if (parseCancel(trimmed[7..])) |oid| {
+                try stderr.print("→ CANCEL order {d}\n", .{oid});
+                client.sendCancel(1, oid) catch |err| {
+                    try stderr.print("Send error: {s}\n", .{@errorName(err)});
+                    continue;
+                };
+                try recvAndPrintResponses(&client, stderr);
+            } else {
+                try stderr.print("Usage: cancel ORDER_ID\n", .{});
+            }
+        } else {
+            try stderr.print("Unknown command. Type 'quit' to exit.\n", .{});
+        }
+    }
+
+    try stderr.print("\n=== Disconnecting ===\n", .{});
+}
+
+const ParsedOrder = struct {
+    symbol: []const u8,
+    price: u32,
+    qty: u32,
+    order_id: u32,
+};
+
+fn parseBuySell(input: []const u8, auto_order_id: *u32) ?ParsedOrder {
+    var iter = std.mem.tokenizeAny(u8, input, " \t");
+
+    const symbol = iter.next() orelse return null;
+    if (symbol.len > 8) return null;
+
+    const price_str = iter.next() orelse return null;
+    const price = std.fmt.parseInt(u32, price_str, 10) catch return null;
+
+    const qty_str = iter.next() orelse return null;
+    const qty = std.fmt.parseInt(u32, qty_str, 10) catch return null;
+
+    // Optional order_id
+    const order_id = if (iter.next()) |oid_str|
+        std.fmt.parseInt(u32, oid_str, 10) catch auto_order_id.*
+    else blk: {
+        const oid = auto_order_id.*;
+        auto_order_id.* += 1;
+        break :blk oid;
+    };
+
+    return ParsedOrder{
+        .symbol = symbol,
+        .price = price,
+        .qty = qty,
+        .order_id = order_id,
+    };
+}
+
+fn parseCancel(input: []const u8) ?u32 {
+    const trimmed = std.mem.trim(u8, input, " \t");
+    return std.fmt.parseInt(u32, trimmed, 10) catch null;
+}
+
+fn recvAndPrintResponses(client: *EngineClient, stderr: anytype) !void {
+    // For TCP, try to receive responses
+    if (client.tcp_client) |*tcp_client| {
+        var response_count: u32 = 0;
+        const max_responses: u32 = 20; // Allow more responses
+
+        // Give the server a moment to send all responses
+        std.time.sleep(50 * std.time.ns_per_ms);
+
+        while (response_count < max_responses) {
+            const raw_data = tcp_client.recv() catch |err| {
+                // After receiving at least one response, timeout is normal
+                if (response_count > 0) break;
+                // No response at all
+                if (err == error.Timeout) {
+                    try stderr.print("[No response - timeout]\n", .{});
+                }
+                break;
+            };
+
+            // Parse the response based on protocol
+            if (client.config.protocol == .binary) {
+                if (binary.isBinaryProtocol(raw_data)) {
+                    const msg = binary.decodeOutput(raw_data) catch |err| {
+                        try stderr.print("[Parse error: {s}]\n", .{@errorName(err)});
+                        response_count += 1;
+                        continue;
+                    };
+                    try printResponse(msg, stderr);
+                } else {
+                    // Unexpected non-binary response
+                    try stderr.print("[RECV] {s}\n", .{raw_data});
+                }
+            } else {
+                // CSV protocol - parse or just print raw
+                const msg = csv.parseOutput(raw_data) catch {
+                    // Just print raw if parse fails
+                    try stderr.print("[RECV] {s}", .{raw_data});
+                    if (raw_data.len > 0 and raw_data[raw_data.len - 1] != '\n') {
+                        try stderr.print("\n", .{});
+                    }
+                    response_count += 1;
+                    continue;
+                };
+                try printResponse(msg, stderr);
+            }
+            response_count += 1;
+        }
     }
 }
 
-fn runSendCancel(args: Args) !void {
-    const stdout = std.io.getStdOut().writer();
+fn printResponse(msg: OutputMessage, stderr: anytype) !void {
+    const symbol = msg.symbol[0..msg.symbol_len];
+    
+    switch (msg.msg_type) {
+        .ack => {
+            try stderr.print("[RECV] A, {s}, {d}, {d}\n", .{
+                symbol,
+                msg.user_id,
+                msg.order_id,
+            });
+        },
+        .cancel_ack => {
+            try stderr.print("[RECV] C, {s}, {d}, {d}\n", .{
+                symbol,
+                msg.user_id,
+                msg.order_id,
+            });
+        },
+        .trade => {
+            try stderr.print("[RECV] T, {s}, {d}, {d}, {d}, {d}, {d}, {d}\n", .{
+                symbol,
+                msg.buy_user_id,
+                msg.buy_order_id,
+                msg.sell_user_id,
+                msg.sell_order_id,
+                msg.price,
+                msg.quantity,
+            });
+        },
+        .top_of_book => {
+            const side_char: u8 = if (msg.side) |s| @intFromEnum(s) else '-';
+            if (msg.price == 0 and msg.quantity == 0) {
+                try stderr.print("[RECV] B, {s}, {c}, -, -\n", .{
+                    symbol,
+                    side_char,
+                });
+            } else {
+                try stderr.print("[RECV] B, {s}, {c}, {d}, {d}\n", .{
+                    symbol,
+                    side_char,
+                    msg.price,
+                    msg.quantity,
+                });
+            }
+        },
+    }
+}
 
-    var client = try EngineClient.init(.{
+// ============================================================
+// Test Scenarios (delegated to scenarios.zig)
+// ============================================================
+
+fn runScenario(args: Args) !void {
+    const stderr = std.io.getStdErr().writer();
+
+    try stderr.print("Connecting to {s}:{d}...\n", .{ args.host, args.port });
+
+    var client = EngineClient.init(.{
         .host = args.host,
         .port = args.port,
         .transport = args.transport,
         .protocol = args.protocol,
-    });
+    }) catch |err| {
+        try stderr.print("Connection failed: {s}\n", .{@errorName(err)});
+        return;
+    };
     defer client.deinit();
 
-    try stdout.print("Sending cancel: user={d} order={d}\n", .{ args.user_id, args.order_id });
-    try client.sendCancel(args.user_id, args.order_id);
-    try stdout.print("Cancel sent.\n", .{});
+    try stderr.print("Connected.\n\n", .{});
+
+    scenarios.run(&client, args.scenario, stderr) catch |err| {
+        if (err == error.UnknownScenario) {
+            try stderr.print("\nUnknown scenario: {d}\n", .{args.scenario});
+        } else {
+            return err;
+        }
+        return;
+    };
+
+    try stderr.print("\n=== Disconnecting ===\n", .{});
 }
 
-fn runSendFlush(args: Args) !void {
-    const stdout = std.io.getStdOut().writer();
-
-    var client = try EngineClient.init(.{
-        .host = args.host,
-        .port = args.port,
-        .transport = args.transport,
-        .protocol = args.protocol,
-    });
-    defer client.deinit();
-
-    try stdout.print("Sending flush...\n", .{});
-    try client.sendFlush();
-    try stdout.print("Flush sent.\n", .{});
-}
+// ============================================================
+// Multicast Subscriber
+// ============================================================
 
 fn runSubscribe(args: Args) !void {
-    const stdout = std.io.getStdOut().writer();
+    const stderr = std.io.getStdErr().writer();
 
-    try stdout.print("Joining multicast group {s}:{d}...\n", .{ args.multicast_group, args.port });
+    try stderr.print("Joining multicast group {s}:{d}...\n", .{ args.multicast_group, args.port });
 
-    var subscriber = try MulticastSubscriber.join(args.multicast_group, args.port);
+    var subscriber = MulticastSubscriber.join(args.multicast_group, args.port) catch |err| {
+        try stderr.print("Failed to join multicast: {s}\n", .{@errorName(err)});
+        return;
+    };
     defer subscriber.close();
 
-    try stdout.print("Subscribed. Waiting for market data (Ctrl+C to stop)...\n\n", .{});
-
-    var buf: [256]u8 = undefined;
+    try stderr.print("Subscribed. Waiting for market data (Ctrl+C to stop)...\n\n", .{});
 
     while (true) {
         const msg = subscriber.recvMessage() catch |err| {
-            try stdout.print("Receive error: {s}\n", .{@errorName(err)});
+            try stderr.print("Receive error: {s}\n", .{@errorName(err)});
             continue;
         };
 
-        const formatted = binary.formatOutput(&msg, &buf);
-        try stdout.print("{s}\n", .{formatted});
+        try printResponse(msg, stderr);
     }
 }
 
+// ============================================================
+// Benchmark
+// ============================================================
+
 fn runBenchmark(args: Args) !void {
-    const stdout = std.io.getStdOut().writer();
+    const stderr = std.io.getStdErr().writer();
 
-    try stdout.print("Connecting to {s}:{d}...\n", .{ args.host, args.port });
+    try stderr.print("Connecting to {s}:{d}...\n", .{ args.host, args.port });
 
-    var client = try EngineClient.init(.{
+    var client = EngineClient.init(.{
         .host = args.host,
         .port = args.port,
         .transport = args.transport,
         .protocol = args.protocol,
-    });
+    }) catch |err| {
+        try stderr.print("Connection failed: {s}\n", .{@errorName(err)});
+        return;
+    };
     defer client.deinit();
 
     const iterations: u32 = 10000;
     var tracker = timestamp.LatencyTracker.init();
 
-    try stdout.print("Running {d} iterations...\n", .{iterations});
+    try stderr.print("Running {d} iterations...\n", .{iterations});
 
     for (0..iterations) |i| {
         const start = timestamp.now();
 
         try client.sendNewOrder(1, "TEST", 10000, 100, .buy, @intCast(i));
 
-        if (args.transport == .tcp) {
+        if (client.tcp_client != null) {
             _ = client.recv() catch {};
         }
 
@@ -331,9 +574,9 @@ fn runBenchmark(args: Args) !void {
 
     var buf: [256]u8 = undefined;
     const stats = tracker.format(&buf);
-    try stdout.print("\nResults: {s}\n", .{stats});
+    try stderr.print("\nResults: {s}\n", .{stats});
     const throughput: u64 = if (tracker.sum > 0) @as(u64, iterations) * 1_000_000_000 / tracker.sum else 0;
-    try stdout.print("Throughput: {d} msg/sec\n", .{throughput});
+    try stderr.print("Throughput: {d} msg/sec\n", .{throughput});
 }
 
 // ============================================================
@@ -355,4 +598,5 @@ test {
     _ = pool;
     _ = ring_buffer;
     _ = timestamp;
+    _ = scenarios;
 }
