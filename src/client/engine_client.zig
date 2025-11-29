@@ -104,7 +104,7 @@ pub const EngineClient = struct {
         return client;
     }
 
-    /// Detect protocol by sending a flush and examining response
+    /// Detect protocol by sending a probe order and examining response
     fn detectProtocol(self: *Self) !Protocol {
         // Only works with TCP (we get responses back)
         if (self.tcp_client == null) {
@@ -112,28 +112,91 @@ pub const EngineClient = struct {
             return .csv;
         }
 
-        // Send a flush command (CSV format - universally accepted)
-        const flush_csv = "F\n";
-        self.tcp_client.?.send(flush_csv) catch {
-            // If send fails, default to CSV
-            return .csv;
+        // Strategy: Send a binary order, check if we get a binary ACK back
+        // Use a distinctive probe order that we'll cancel immediately
+        const probe_order = types.BinaryNewOrder.init(
+            0xFFFF,  // Special user_id for probe
+            "PROBE",
+            1,       // price
+            1,       // qty
+            .buy,
+            0xFFFFFFFF,  // Special order_id for probe
+        );
+        
+        self.tcp_client.?.send(probe_order.asBytes()) catch {
+            // If send fails, try CSV approach
+            return self.detectProtocolCsv();
         };
 
-        // Wait a bit for response
-        std.time.sleep(100 * std.time.ns_per_ms);
+        // Wait for response
+        std.time.sleep(200 * std.time.ns_per_ms);
 
         // Try to receive response
         const response = self.tcp_client.?.recv() catch {
-            // No response or timeout - default to CSV
-            return .csv;
+            // No response to binary - server might not understand it, try CSV
+            return self.detectProtocolCsv();
         };
 
-        // Check if response looks like binary
+        // Check if response looks like binary (starts with magic byte 0x4D)
         if (response.len > 0 and binary.isBinaryProtocol(response)) {
+            // Got binary response! Now send a cancel to clean up
+            const cancel = types.BinaryCancel.init(0xFFFF, 0xFFFFFFFF);
+            self.tcp_client.?.send(cancel.asBytes()) catch {};
+            std.time.sleep(50 * std.time.ns_per_ms);
+            _ = self.tcp_client.?.recv() catch {}; // Drain cancel ack
             return .binary;
         }
 
-        // Default to CSV
+        // Response was CSV format (or empty) - clean up with CSV cancel
+        if (response.len > 0) {
+            // Got a CSV response, send CSV cancel to clean up
+            var buf: [64]u8 = undefined;
+            const cancel_csv = std.fmt.bufPrint(&buf, "C, {d}, {d}\n", .{ 0xFFFF, 0xFFFFFFFF }) catch "C, 65535, 4294967295\n";
+            self.tcp_client.?.send(cancel_csv) catch {};
+            std.time.sleep(50 * std.time.ns_per_ms);
+            _ = self.tcp_client.?.recv() catch {}; // Drain response
+            return .csv;
+        }
+
+        return self.detectProtocolCsv();
+    }
+
+    /// Fallback CSV detection - try sending CSV order
+    fn detectProtocolCsv(self: *Self) Protocol {
+        if (self.tcp_client == null) return .csv;
+
+        // Send CSV probe order
+        const csv_order = "N, 65535, PROBE, 1, 1, B, 4294967295\n";
+        self.tcp_client.?.send(csv_order) catch {
+            return .csv;
+        };
+
+        std.time.sleep(200 * std.time.ns_per_ms);
+
+        const response = self.tcp_client.?.recv() catch {
+            // No response at all - default to CSV
+            return .csv;
+        };
+
+        // Check if response is binary (server responds in its native format)
+        if (response.len > 0 and binary.isBinaryProtocol(response)) {
+            // Server responded with binary to our CSV - it's a binary server
+            // Clean up
+            const cancel = types.BinaryCancel.init(0xFFFF, 0xFFFFFFFF);
+            self.tcp_client.?.send(cancel.asBytes()) catch {};
+            std.time.sleep(50 * std.time.ns_per_ms);
+            _ = self.tcp_client.?.recv() catch {};
+            return .binary;
+        }
+
+        // Got CSV response, clean up
+        if (response.len > 0) {
+            const cancel_csv = "C, 65535, 4294967295\n";
+            self.tcp_client.?.send(cancel_csv) catch {};
+            std.time.sleep(50 * std.time.ns_per_ms);
+            _ = self.tcp_client.?.recv() catch {};
+        }
+
         return .csv;
     }
 
