@@ -113,14 +113,14 @@ pub const EngineClient = struct {
         }
 
         // Strategy: Send a binary order, check if we get a binary ACK back
-        // Use a distinctive probe order that we'll cancel immediately
+        // Use user_id=1 (normal), and a high order_id we'll cancel immediately
         const probe_order = types.BinaryNewOrder.init(
-            0xFFFF,  // Special user_id for probe
-            "PROBE",
-            1,       // price
-            1,       // qty
+            1,           // user_id (use 1, server assigns based on connection)
+            "ZZPROBE",   // Symbol starting with Z (processor 1)
+            1,           // price
+            1,           // qty
             .buy,
-            0xFFFFFFFF,  // Special order_id for probe
+            999999999,   // High order_id for probe
         );
         
         self.tcp_client.?.send(probe_order.asBytes()) catch {
@@ -140,21 +140,22 @@ pub const EngineClient = struct {
         // Check if response looks like binary (starts with magic byte 0x4D)
         if (response.len > 0 and binary.isBinaryProtocol(response)) {
             // Got binary response! Now send a cancel to clean up
-            const cancel = types.BinaryCancel.init(0xFFFF, 0xFFFFFFFF);
+            const cancel = types.BinaryCancel.init(1, 999999999);
             self.tcp_client.?.send(cancel.asBytes()) catch {};
             std.time.sleep(50 * std.time.ns_per_ms);
             _ = self.tcp_client.?.recv() catch {}; // Drain cancel ack
+            _ = self.tcp_client.?.recv() catch {}; // Drain TOB update
             return .binary;
         }
 
         // Response was CSV format (or empty) - clean up with CSV cancel
         if (response.len > 0) {
             // Got a CSV response, send CSV cancel to clean up
-            var buf: [64]u8 = undefined;
-            const cancel_csv = std.fmt.bufPrint(&buf, "C, {d}, {d}\n", .{ 0xFFFF, 0xFFFFFFFF }) catch "C, 65535, 4294967295\n";
+            const cancel_csv = "C, 1, 999999999\n";
             self.tcp_client.?.send(cancel_csv) catch {};
             std.time.sleep(50 * std.time.ns_per_ms);
             _ = self.tcp_client.?.recv() catch {}; // Drain response
+            _ = self.tcp_client.?.recv() catch {}; // Drain TOB
             return .csv;
         }
 
@@ -166,7 +167,7 @@ pub const EngineClient = struct {
         if (self.tcp_client == null) return .csv;
 
         // Send CSV probe order
-        const csv_order = "N, 65535, PROBE, 1, 1, B, 4294967295\n";
+        const csv_order = "N, 1, ZZPROBE, 1, 1, B, 999999999\n";
         self.tcp_client.?.send(csv_order) catch {
             return .csv;
         };
@@ -182,18 +183,20 @@ pub const EngineClient = struct {
         if (response.len > 0 and binary.isBinaryProtocol(response)) {
             // Server responded with binary to our CSV - it's a binary server
             // Clean up
-            const cancel = types.BinaryCancel.init(0xFFFF, 0xFFFFFFFF);
+            const cancel = types.BinaryCancel.init(1, 999999999);
             self.tcp_client.?.send(cancel.asBytes()) catch {};
             std.time.sleep(50 * std.time.ns_per_ms);
+            _ = self.tcp_client.?.recv() catch {};
             _ = self.tcp_client.?.recv() catch {};
             return .binary;
         }
 
         // Got CSV response, clean up
         if (response.len > 0) {
-            const cancel_csv = "C, 65535, 4294967295\n";
+            const cancel_csv = "C, 1, 999999999\n";
             self.tcp_client.?.send(cancel_csv) catch {};
             std.time.sleep(50 * std.time.ns_per_ms);
+            _ = self.tcp_client.?.recv() catch {};
             _ = self.tcp_client.?.recv() catch {};
         }
 
