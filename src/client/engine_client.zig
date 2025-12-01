@@ -142,9 +142,8 @@ pub const EngineClient = struct {
             // Got binary response! Now send a cancel to clean up
             const cancel = types.BinaryCancel.init(1, 999999999);
             self.tcp_client.?.send(cancel.asBytes()) catch {};
-            std.time.sleep(50 * std.time.ns_per_ms);
-            _ = self.tcp_client.?.recv() catch {}; // Drain cancel ack
-            _ = self.tcp_client.?.recv() catch {}; // Drain TOB update
+            // Drain all remaining responses from probe
+            self.drainResponses();
             return .binary;
         }
 
@@ -153,9 +152,8 @@ pub const EngineClient = struct {
             // Got a CSV response, send CSV cancel to clean up
             const cancel_csv = "C, 1, 999999999\n";
             self.tcp_client.?.send(cancel_csv) catch {};
-            std.time.sleep(50 * std.time.ns_per_ms);
-            _ = self.tcp_client.?.recv() catch {}; // Drain response
-            _ = self.tcp_client.?.recv() catch {}; // Drain TOB
+            // Drain all remaining responses from probe
+            self.drainResponses();
             return .csv;
         }
 
@@ -185,9 +183,7 @@ pub const EngineClient = struct {
             // Clean up
             const cancel = types.BinaryCancel.init(1, 999999999);
             self.tcp_client.?.send(cancel.asBytes()) catch {};
-            std.time.sleep(50 * std.time.ns_per_ms);
-            _ = self.tcp_client.?.recv() catch {};
-            _ = self.tcp_client.?.recv() catch {};
+            self.drainResponses();
             return .binary;
         }
 
@@ -195,12 +191,26 @@ pub const EngineClient = struct {
         if (response.len > 0) {
             const cancel_csv = "C, 1, 999999999\n";
             self.tcp_client.?.send(cancel_csv) catch {};
-            std.time.sleep(50 * std.time.ns_per_ms);
-            _ = self.tcp_client.?.recv() catch {};
-            _ = self.tcp_client.?.recv() catch {};
+            self.drainResponses();
         }
 
         return .csv;
+    }
+
+    /// Drain any remaining responses from the socket
+    fn drainResponses(self: *Self) void {
+        if (self.tcp_client == null) return;
+        
+        // Wait a bit for all responses to arrive
+        std.time.sleep(100 * std.time.ns_per_ms);
+        
+        // Keep reading until we get a timeout/would-block
+        var drain_count: u32 = 0;
+        while (drain_count < 20) : (drain_count += 1) {
+            _ = self.tcp_client.?.recv() catch {
+                break;
+            };
+        }
     }
 
     /// Get the detected/configured transport
