@@ -394,60 +394,80 @@ fn parseCancel(input: []const u8) ?u32 {
 }
 
 fn recvAndPrintResponses(client: *EngineClient, stderr: anytype) !void {
-    // For TCP, try to receive responses
+    const proto = client.getProtocol();
+
+    // Handle TCP responses
     if (client.tcp_client) |*tcp_client| {
         var response_count: u32 = 0;
-        const max_responses: u32 = 20; // Allow more responses
+        const max_responses: u32 = 20;
 
         // Give the server a moment to send all responses
         std.time.sleep(50 * std.time.ns_per_ms);
 
         while (response_count < max_responses) {
             const raw_data = tcp_client.recv() catch |err| {
-                // After receiving at least one response, timeout is normal
                 if (response_count > 0) break;
-                // No response at all
                 if (err == error.Timeout) {
                     try stderr.print("[No response - timeout]\n", .{});
                 }
                 break;
             };
 
-            // Parse the response based on detected protocol
-            const proto = client.getProtocol();
-            if (proto == .binary) {
-                if (binary.isBinaryProtocol(raw_data)) {
-                    const msg = binary.decodeOutput(raw_data) catch |err| {
-                        try stderr.print("[Parse error: {s}]\n", .{@errorName(err)});
-                        response_count += 1;
-                        continue;
-                    };
-                    try printResponse(msg, stderr);
-                } else {
-                    // Unexpected non-binary response
-                    try stderr.print("[RECV] {s}\n", .{raw_data});
-                }
-            } else {
-                // CSV protocol (or auto) - parse or just print raw
-                const msg = csv.parseOutput(raw_data) catch {
-                    // Just print raw if parse fails
-                    try stderr.print("[RECV] {s}", .{raw_data});
-                    if (raw_data.len > 0 and raw_data[raw_data.len - 1] != '\n') {
-                        try stderr.print("\n", .{});
-                    }
-                    response_count += 1;
-                    continue;
-                };
-                try printResponse(msg, stderr);
-            }
+            try printRawResponse(raw_data, proto, stderr);
             response_count += 1;
         }
+    }
+    // Handle UDP responses
+    else if (client.udp_client) |*udp_client| {
+        var response_count: u32 = 0;
+        const max_responses: u32 = 20;
+
+        // Give server time to respond
+        std.time.sleep(50 * std.time.ns_per_ms);
+
+        while (response_count < max_responses) {
+            const raw_data = udp_client.recv() catch {
+                // For UDP, timeout/no data is normal after getting responses
+                break;
+            };
+
+            try printRawResponse(raw_data, proto, stderr);
+            response_count += 1;
+        }
+
+        if (response_count == 0) {
+            try stderr.print("[No UDP response received]\n", .{});
+        }
+    }
+}
+
+fn printRawResponse(raw_data: []const u8, proto: Protocol, stderr: anytype) !void {
+    if (proto == .binary) {
+        if (binary.isBinaryProtocol(raw_data)) {
+            const msg = binary.decodeOutput(raw_data) catch |err| {
+                try stderr.print("[Parse error: {s}]\n", .{@errorName(err)});
+                return;
+            };
+            try printResponse(msg, stderr);
+        } else {
+            try stderr.print("[RECV] {s}\n", .{raw_data});
+        }
+    } else {
+        // CSV protocol (or auto) - parse or just print raw
+        const msg = csv.parseOutput(raw_data) catch {
+            try stderr.print("[RECV] {s}", .{raw_data});
+            if (raw_data.len > 0 and raw_data[raw_data.len - 1] != '\n') {
+                try stderr.print("\n", .{});
+            }
+            return;
+        };
+        try printResponse(msg, stderr);
     }
 }
 
 fn printResponse(msg: OutputMessage, stderr: anytype) !void {
     const symbol = msg.symbol[0..msg.symbol_len];
-    
+
     switch (msg.msg_type) {
         .ack => {
             try stderr.print("[RECV] A, {s}, {d}, {d}\n", .{

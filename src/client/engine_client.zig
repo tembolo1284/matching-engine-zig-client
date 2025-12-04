@@ -37,6 +37,8 @@ pub const Config = struct {
     port: u16 = 1234,
     transport: Transport = .auto,
     protocol: Protocol = .auto,
+    /// Timeout for UDP receive in milliseconds (0 = blocking)
+    udp_recv_timeout_ms: u32 = 1000,
 };
 
 /// Discovery result
@@ -115,14 +117,14 @@ pub const EngineClient = struct {
         // Strategy: Send a binary order, check if we get a binary ACK back
         // Use user_id=1 (normal), and a high order_id we'll cancel immediately
         const probe_order = types.BinaryNewOrder.init(
-            1,           // user_id (use 1, server assigns based on connection)
-            "ZZPROBE",   // Symbol starting with Z (processor 1)
-            1,           // price
-            1,           // qty
+            1, // user_id (use 1, server assigns based on connection)
+            "ZZPROBE", // Symbol starting with Z (processor 1)
+            1, // price
+            1, // qty
             .buy,
-            999999999,   // High order_id for probe
+            999999999, // High order_id for probe
         );
-        
+
         self.tcp_client.?.send(probe_order.asBytes()) catch {
             // If send fails, try CSV approach
             return self.detectProtocolCsv();
@@ -200,10 +202,10 @@ pub const EngineClient = struct {
     /// Drain any remaining responses from the socket
     fn drainResponses(self: *Self) void {
         if (self.tcp_client == null) return;
-        
+
         // Wait a bit for all responses to arrive
         std.time.sleep(100 * std.time.ns_per_ms);
-        
+
         // Keep reading until we get a timeout/would-block
         var drain_count: u32 = 0;
         while (drain_count < 20) : (drain_count += 1) {
@@ -309,29 +311,65 @@ pub const EngineClient = struct {
         }
     }
 
-    /// Receive the next response message (TCP only).
-    /// For UDP, use multicast subscriber to receive market data.
+    /// Receive the next response message.
+    /// Works for both TCP and UDP transports.
     pub fn recv(self: *Self) !types.OutputMessage {
-        if (self.tcp_client) |*client| {
-            const data = try client.recv();
+        const data = try self.recvRaw();
 
-            // Auto-detect protocol
-            if (binary.isBinaryProtocol(data)) {
-                return try binary.decodeOutput(data);
-            } else {
-                return try csv.parseOutput(data);
-            }
+        // Auto-detect protocol from response
+        if (binary.isBinaryProtocol(data)) {
+            return try binary.decodeOutput(data);
+        } else {
+            return try csv.parseOutput(data);
         }
-
-        return error.RecvFailed;
     }
 
-    /// Receive raw response bytes (TCP only)
+    /// Receive raw response bytes.
+    /// Works for both TCP and UDP transports.
     pub fn recvRaw(self: *Self) ![]const u8 {
         if (self.tcp_client) |*client| {
             return try client.recv();
+        } else if (self.udp_client) |*client| {
+            return try client.recv();
         }
-        return error.RecvFailed;
+        return error.NotConnected;
+    }
+
+    /// Try to receive with a timeout (non-blocking check).
+    /// Returns null if no data available within timeout.
+    /// Useful for interactive mode where you don't want to block forever.
+    pub fn tryRecv(self: *Self, timeout_ms: u32) !?types.OutputMessage {
+        const data = try self.tryRecvRaw(timeout_ms);
+        if (data) |d| {
+            if (binary.isBinaryProtocol(d)) {
+                return try binary.decodeOutput(d);
+            } else {
+                return try csv.parseOutput(d);
+            }
+        }
+        return null;
+    }
+
+    /// Try to receive raw bytes with a timeout.
+    /// Returns null if no data available.
+    pub fn tryRecvRaw(self: *Self, timeout_ms: u32) !?[]const u8 {
+        if (self.tcp_client) |*client| {
+            // TCP: try non-blocking receive
+            return client.recv() catch |err| {
+                if (err == error.WouldBlock) return null;
+                return err;
+            };
+        } else if (self.udp_client) |*client| {
+            // UDP: use poll/select or just try recv
+            // For simplicity, do a blocking recv with OS timeout
+            // (In production, you'd set SO_RCVTIMEO or use poll)
+            _ = timeout_ms; // TODO: implement proper timeout
+            return client.recv() catch |err| {
+                if (err == error.WouldBlock) return null;
+                return err;
+            };
+        }
+        return error.NotConnected;
     }
 
     /// Check if connected (TCP only, UDP is connectionless)

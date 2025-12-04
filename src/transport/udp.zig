@@ -1,6 +1,4 @@
 //! UDP transport layer.
-//!
-//! Fire-and-forget message delivery with lowest latency.
 //! No framing needed - each UDP packet is one message.
 
 const std = @import("std");
@@ -12,11 +10,27 @@ pub const UdpClient = struct {
 
     const Self = @This();
 
+    /// Default receive timeout in milliseconds
+    const DEFAULT_RECV_TIMEOUT_MS: u32 = 200;
+
     /// Create UDP client targeting the specified server
     pub fn init(host: []const u8, port: u16) !Self {
+        return initWithTimeout(host, port, DEFAULT_RECV_TIMEOUT_MS);
+    }
+
+    /// Create UDP client with custom receive timeout
+    pub fn initWithTimeout(host: []const u8, port: u16, recv_timeout_ms: u32) !Self {
         const addr = try socket.Address.parseIpv4(host, port);
 
-        var sock = try socket.UdpSocket.init(.{});
+        // Create socket WITH receive timeout so recv() doesn't block forever
+        var sock = try socket.UdpSocket.init(.{
+            .recv_timeout_ms = recv_timeout_ms,
+        });
+
+        // Bind to ephemeral port so we can receive responses
+        const bind_addr = socket.Address.initIpv4(.{ 0, 0, 0, 0 }, 0);
+        try sock.bind(bind_addr);
+
         sock.setTarget(addr);
 
         return .{ .sock = sock };
@@ -27,9 +41,8 @@ pub const UdpClient = struct {
         _ = try self.sock.send(data);
     }
 
-    /// Receive a message (blocking)
-    /// Note: UDP mode is typically fire-and-forget, so this is mainly
-    /// for testing or receiving multicast data.
+    /// Receive a message (with timeout)
+    /// Returns the received data, or error.WouldBlock on timeout
     pub fn recv(self: *Self) ![]const u8 {
         const n = try self.sock.recv(&self.recv_buf);
         return self.recv_buf[0..n];
