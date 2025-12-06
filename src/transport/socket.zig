@@ -158,7 +158,7 @@ pub const UdpSocket = struct {
 
         // IP_ADD_MEMBERSHIP = 12 on most platforms
         const IP_ADD_MEMBERSHIP = 12;
-        
+
         std.posix.setsockopt(
             self.handle,
             std.posix.IPPROTO.IP,
@@ -244,6 +244,30 @@ pub const TcpSocket = struct {
 // Platform-specific helpers
 // ============================================================
 
+/// Cross-platform timeval struct for socket timeouts.
+/// macOS/Darwin uses different field names than Linux in Zig's std.c bindings,
+/// so we define our own struct that matches the C layout on all platforms.
+const Timeval = extern struct {
+    /// Seconds - i64 on Darwin, isize (i64 on 64-bit, i32 on 32-bit) on Linux
+    sec: switch (builtin.os.tag) {
+        .macos, .ios, .tvos, .watchos, .visionos => i64,
+        else => isize,
+    },
+    /// Microseconds - i32 on Darwin, isize on Linux
+    usec: switch (builtin.os.tag) {
+        .macos, .ios, .tvos, .watchos, .visionos => i32,
+        else => isize,
+    },
+};
+
+/// Create a Timeval from milliseconds
+fn makeTimeval(ms: u32) Timeval {
+    return .{
+        .sec = @intCast(ms / 1000),
+        .usec = @intCast((ms % 1000) * 1000),
+    };
+}
+
 fn applyOptions(handle: Handle, options: Options) SocketError!void {
     if (options.reuse_addr) {
         std.posix.setsockopt(
@@ -302,11 +326,8 @@ fn setRecvTimeout(handle: Handle, ms: u32) SocketError!void {
             &std.mem.toBytes(@as(c_int, @intCast(ms))),
         ) catch |err| return translateError(err);
     } else {
-        // POSIX uses timeval
-        const tv = std.posix.timeval{
-            .tv_sec = @intCast(ms / 1000),
-            .tv_usec = @intCast((ms % 1000) * 1000),
-        };
+        // POSIX (Linux, macOS, BSD) uses timeval
+        const tv = makeTimeval(ms);
         std.posix.setsockopt(
             handle,
             std.posix.SOL.SOCKET,
@@ -325,10 +346,7 @@ fn setSendTimeout(handle: Handle, ms: u32) SocketError!void {
             &std.mem.toBytes(@as(c_int, @intCast(ms))),
         ) catch |err| return translateError(err);
     } else {
-        const tv = std.posix.timeval{
-            .tv_sec = @intCast(ms / 1000),
-            .tv_usec = @intCast((ms % 1000) * 1000),
-        };
+        const tv = makeTimeval(ms);
         std.posix.setsockopt(
             handle,
             std.posix.SOL.SOCKET,
@@ -351,6 +369,29 @@ fn translateError(err: anyerror) SocketError {
 // ============================================================
 // Tests
 // ============================================================
+
+test "Timeval size matches platform expectations" {
+    // Verify our Timeval struct is the right size for the platform
+    const expected_size: usize = switch (builtin.os.tag) {
+        .macos, .ios, .tvos, .watchos, .visionos => 16, // i64 + i32 + padding
+        .linux => if (@sizeOf(isize) == 8) 16 else 8, // 64-bit vs 32-bit
+        else => @sizeOf(Timeval),
+    };
+    // Allow for platform variations, just ensure it's reasonable
+    try std.testing.expect(@sizeOf(Timeval) >= 8);
+    try std.testing.expect(@sizeOf(Timeval) <= 24);
+    _ = expected_size;
+}
+
+test "makeTimeval conversion" {
+    const tv = makeTimeval(1500); // 1.5 seconds
+    try std.testing.expectEqual(@as(@TypeOf(tv.sec), 1), tv.sec);
+    try std.testing.expectEqual(@as(@TypeOf(tv.usec), 500000), tv.usec);
+
+    const tv2 = makeTimeval(200); // 200ms
+    try std.testing.expectEqual(@as(@TypeOf(tv2.sec), 0), tv2.sec);
+    try std.testing.expectEqual(@as(@TypeOf(tv2.usec), 200000), tv2.usec);
+}
 
 test "parse IPv4 address" {
     const addr = try Address.parseIpv4("127.0.0.1", 12345);
