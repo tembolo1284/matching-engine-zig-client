@@ -48,12 +48,13 @@ pub fn formatNewOrder(
 pub fn formatCancel(
     buf: []u8,
     user_id: u32,
+    symbol: []const u8,
     order_id: u32,
 ) ParseError![]const u8 {
     var stream = std.io.fixedBufferStream(buf);
     const writer = stream.writer();
 
-    writer.print("C, {d}, {d}\n", .{ user_id, order_id }) catch return ParseError.BufferTooSmall;
+    writer.print("C, {d}, {s}, {d}\n", .{ user_id, symbol, order_id }) catch return ParseError.BufferTooSmall;
 
     return stream.getWritten();
 }

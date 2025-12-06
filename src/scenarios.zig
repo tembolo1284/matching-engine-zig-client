@@ -127,7 +127,7 @@ fn runScenario3(client: *EngineClient, stderr: anytype) !void {
 
     // Cancel
     try stderr.print("\nSending: CANCEL order 1\n", .{});
-    try client.sendCancel(1, 1);
+    try client.sendCancel(1, "IBM", 1);
     std.time.sleep(100 * std.time.ns_per_ms);
     try recvAndPrintResponses(client, stderr);
 }
@@ -489,12 +489,13 @@ fn runBurstStress(client: *EngineClient, stderr: anytype, count: u32) !void {
 // ============================================================
 
 fn recvAndPrintResponses(client: *EngineClient, stderr: anytype) !void {
-    // For TCP, try to receive responses
+    const proto = client.getProtocol();
+
+    // Handle TCP responses
     if (client.tcp_client) |*tcp_client| {
         var response_count: u32 = 0;
         const max_responses: u32 = 20;
 
-        // Give the server a moment to send all responses
         std.time.sleep(50 * std.time.ns_per_ms);
 
         while (response_count < max_responses) {
@@ -506,31 +507,52 @@ fn recvAndPrintResponses(client: *EngineClient, stderr: anytype) !void {
                 break;
             };
 
-            // Parse the response based on protocol
-            if (client.config.protocol == .binary) {
-                if (binary.isBinaryProtocol(raw_data)) {
-                    const msg = binary.decodeOutput(raw_data) catch |err| {
-                        try stderr.print("[Parse error: {s}]\n", .{@errorName(err)});
-                        response_count += 1;
-                        continue;
-                    };
-                    try printResponse(msg, stderr);
-                } else {
-                    try stderr.print("[RECV] {s}\n", .{raw_data});
-                }
-            } else {
-                const msg = csv.parseOutput(raw_data) catch {
-                    try stderr.print("[RECV] {s}", .{raw_data});
-                    if (raw_data.len > 0 and raw_data[raw_data.len - 1] != '\n') {
-                        try stderr.print("\n", .{});
-                    }
-                    response_count += 1;
-                    continue;
-                };
-                try printResponse(msg, stderr);
-            }
+            try printRawResponse(raw_data, proto, stderr);
             response_count += 1;
         }
+    }
+    // Handle UDP responses
+    else if (client.udp_client) |*udp_client| {
+        var response_count: u32 = 0;
+        const max_responses: u32 = 20;
+
+        std.time.sleep(50 * std.time.ns_per_ms);
+
+        while (response_count < max_responses) {
+            const raw_data = udp_client.recv() catch {
+                break;
+            };
+
+            try printRawResponse(raw_data, proto, stderr);
+            response_count += 1;
+        }
+
+        if (response_count == 0) {
+            try stderr.print("[No UDP response received]\n", .{});
+        }
+    }
+}
+
+fn printRawResponse(raw_data: []const u8, proto: engine_client.Protocol, stderr: anytype) !void {
+    if (proto == .binary) {
+        if (binary.isBinaryProtocol(raw_data)) {
+            const msg = binary.decodeOutput(raw_data) catch |err| {
+                try stderr.print("[Parse error: {s}]\n", .{@errorName(err)});
+                return;
+            };
+            try printResponse(msg, stderr);
+        } else {
+            try stderr.print("[RECV] {s}\n", .{raw_data});
+        }
+    } else {
+        const msg = csv.parseOutput(raw_data) catch {
+            try stderr.print("[RECV] {s}", .{raw_data});
+            if (raw_data.len > 0 and raw_data[raw_data.len - 1] != '\n') {
+                try stderr.print("\n", .{});
+            }
+            return;
+        };
+        try printResponse(msg, stderr);
     }
 }
 

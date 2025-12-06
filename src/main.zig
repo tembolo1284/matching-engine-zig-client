@@ -50,8 +50,8 @@ pub const order = order_builder.order;
 const Args = struct {
     host: []const u8 = "127.0.0.1",
     port: u16 = 1234,
-    transport: Transport = .auto,  // Auto-detect by default
-    protocol: Protocol = .auto,    // Auto-detect by default
+    transport: Transport = .auto, // Auto-detect by default
+    protocol: Protocol = .auto, // Auto-detect by default
     command: Command = .interactive,
 
     // Scenario number (1, 2, 3, or 0 for interactive)
@@ -210,7 +210,7 @@ fn printHelp() void {
         \\Interactive Commands:
         \\  buy SYMBOL PRICE QTY [ORDER_ID]
         \\  sell SYMBOL PRICE QTY [ORDER_ID]
-        \\  cancel ORDER_ID
+        \\  cancel SYMBOL ORDER_ID
         \\  flush
         \\  quit / exit
         \\
@@ -272,7 +272,7 @@ fn runInteractive(args: Args) !void {
     try stderr.print("Commands:\n", .{});
     try stderr.print("  buy SYMBOL PRICE QTY [ORDER_ID]\n", .{});
     try stderr.print("  sell SYMBOL PRICE QTY [ORDER_ID]\n", .{});
-    try stderr.print("  cancel ORDER_ID\n", .{});
+    try stderr.print("  cancel SYMBOL ORDER_ID\n", .{});
     try stderr.print("  flush\n", .{});
     try stderr.print("  quit\n\n", .{});
 
@@ -334,15 +334,15 @@ fn runInteractive(args: Args) !void {
                 try stderr.print("Usage: sell SYMBOL PRICE QTY [ORDER_ID]\n", .{});
             }
         } else if (std.mem.startsWith(u8, trimmed, "cancel ")) {
-            if (parseCancel(trimmed[7..])) |oid| {
-                try stderr.print("→ CANCEL order {d}\n", .{oid});
-                client.sendCancel(1, oid) catch |err| {
+            if (parseCancel(trimmed[7..])) |parsed| {
+                try stderr.print("→ CANCEL {s} order {d}\n", .{ parsed.symbol, parsed.order_id });
+                client.sendCancel(1, parsed.symbol, parsed.order_id) catch |err| {
                     try stderr.print("Send error: {s}\n", .{@errorName(err)});
                     continue;
                 };
                 try recvAndPrintResponses(&client, stderr);
             } else {
-                try stderr.print("Usage: cancel ORDER_ID\n", .{});
+                try stderr.print("Usage: cancel SYMBOL ORDER_ID\n", .{});
             }
         } else {
             try stderr.print("Unknown command. Type 'quit' to exit.\n", .{});
@@ -388,9 +388,24 @@ fn parseBuySell(input: []const u8, auto_order_id: *u32) ?ParsedOrder {
     };
 }
 
-fn parseCancel(input: []const u8) ?u32 {
-    const trimmed = std.mem.trim(u8, input, " \t");
-    return std.fmt.parseInt(u32, trimmed, 10) catch null;
+const ParsedCancel = struct {
+    symbol: []const u8,
+    order_id: u32,
+};
+
+fn parseCancel(input: []const u8) ?ParsedCancel {
+    var iter = std.mem.tokenizeAny(u8, input, " \t");
+
+    const symbol = iter.next() orelse return null;
+    if (symbol.len == 0 or symbol.len > 8) return null;
+
+    const oid_str = iter.next() orelse return null;
+    const order_id = std.fmt.parseInt(u32, oid_str, 10) catch return null;
+
+    return ParsedCancel{
+        .symbol = symbol,
+        .order_id = order_id,
+    };
 }
 
 fn recvAndPrintResponses(client: *EngineClient, stderr: anytype) !void {

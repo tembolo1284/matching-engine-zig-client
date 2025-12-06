@@ -115,23 +115,29 @@ pub const BinaryNewOrder = extern struct {
     }
 };
 
-/// Binary cancel order message - 11 bytes on wire.
+/// Binary cancel order message - 19 bytes on wire.
 pub const BinaryCancel = extern struct {
     magic: u8 = MAGIC_BYTE,
     msg_type: u8 = @intFromEnum(InputMsgType.cancel),
     user_id: u32 align(1),
+    symbol: [8]u8,
     user_order_id: u32 align(1),
     _pad: u8 = 0,
 
     comptime {
-        if (@sizeOf(BinaryCancel) != 11) {
-            @compileError("BinaryCancel must be exactly 11 bytes");
+        if (@sizeOf(BinaryCancel) != 19) {
+            @compileError("BinaryCancel must be exactly 19 bytes");
         }
     }
 
-    pub fn init(user_id: u32, order_id: u32) BinaryCancel {
+    pub fn init(user_id: u32, symbol: []const u8, order_id: u32) BinaryCancel {
+        var sym: [8]u8 = .{0} ** 8;
+        const len = @min(symbol.len, 8);
+        @memcpy(sym[0..len], symbol[0..len]);
+
         return .{
             .user_id = std.mem.nativeToBig(u32, user_id),
+            .symbol = sym,
             .user_order_id = std.mem.nativeToBig(u32, order_id),
         };
     }

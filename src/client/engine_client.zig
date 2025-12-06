@@ -142,7 +142,7 @@ pub const EngineClient = struct {
         // Check if response looks like binary (starts with magic byte 0x4D)
         if (response.len > 0 and binary.isBinaryProtocol(response)) {
             // Got binary response! Now send a cancel to clean up
-            const cancel = types.BinaryCancel.init(1, 999999999);
+            const cancel = types.BinaryCancel.init(1, "ZZPROBE", 999999999);
             self.tcp_client.?.send(cancel.asBytes()) catch {};
             // Drain all remaining responses from probe
             self.drainResponses();
@@ -152,7 +152,7 @@ pub const EngineClient = struct {
         // Response was CSV format (or empty) - clean up with CSV cancel
         if (response.len > 0) {
             // Got a CSV response, send CSV cancel to clean up
-            const cancel_csv = "C, 1, 999999999\n";
+            const cancel_csv = "C, 1, ZZPROBE, 999999999\n";
             self.tcp_client.?.send(cancel_csv) catch {};
             // Drain all remaining responses from probe
             self.drainResponses();
@@ -183,7 +183,7 @@ pub const EngineClient = struct {
         if (response.len > 0 and binary.isBinaryProtocol(response)) {
             // Server responded with binary to our CSV - it's a binary server
             // Clean up
-            const cancel = types.BinaryCancel.init(1, 999999999);
+            const cancel = types.BinaryCancel.init(1, "ZZPROBE", 999999999);
             self.tcp_client.?.send(cancel.asBytes()) catch {};
             self.drainResponses();
             return .binary;
@@ -191,7 +191,7 @@ pub const EngineClient = struct {
 
         // Got CSV response, clean up
         if (response.len > 0) {
-            const cancel_csv = "C, 1, 999999999\n";
+            const cancel_csv = "C, 1, ZZPROBE, 999999999\n";
             self.tcp_client.?.send(cancel_csv) catch {};
             self.drainResponses();
         }
@@ -269,15 +269,15 @@ pub const EngineClient = struct {
     }
 
     /// Send a cancel order request
-    pub fn sendCancel(self: *Self, user_id: u32, order_id: u32) !void {
+    pub fn sendCancel(self: *Self, user_id: u32, symbol: []const u8, order_id: u32) !void {
         const proto = self.detected_protocol;
         const data = switch (proto) {
             .binary => blk: {
-                const msg = types.BinaryCancel.init(user_id, order_id);
+                const msg = types.BinaryCancel.init(user_id, symbol, order_id);
                 break :blk msg.asBytes();
             },
             .csv, .auto => blk: {
-                const result = try csv.formatCancel(&self.send_buf, user_id, order_id);
+                const result = try csv.formatCancel(&self.send_buf, user_id, symbol, order_id);
                 break :blk result;
             },
         };
