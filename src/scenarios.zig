@@ -251,9 +251,9 @@ fn runStressTest(client: *EngineClient, stderr: anytype, count: u32) !void {
     const batch_size: u32 = if (count >= 1_000_000) 50_000 else if (count >= 100_000) 10_000 else if (count >= 10_000) 1_000 else count;
 
     // Delay between batches (microseconds worth of nanoseconds)
-    const delay_between_batches: u64 = if (count >= 10_000_000) 50 * std.time.ns_per_ms // 50ms for 10M+
-    else if (count >= 1_000_000) 20 * std.time.ns_per_ms // 20ms for 1M+
-    else if (count >= 100_000) 10 * std.time.ns_per_ms // 10ms for 100K+
+    const delay_between_batches: u64 = if (count >= 10_000_000) 75 * std.time.ns_per_ms // 50ms for 10M+
+    else if (count >= 1_000_000) 50 * std.time.ns_per_ms // 20ms for 1M+
+    else if (count >= 100_000) 25 * std.time.ns_per_ms // 10ms for 100K+
     else 0;
 
     if (delay_between_batches > 0) {
