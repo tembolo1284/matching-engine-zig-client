@@ -2,6 +2,9 @@
 //!
 //! Provides pre-defined test scenarios for basic functionality testing
 //! and stress testing of the matching engine.
+//!
+//! Supports batched UDP responses where multiple CSV messages are packed
+//! into a single UDP packet.
 
 const std = @import("std");
 const types = @import("protocol/types.zig");
@@ -24,6 +27,7 @@ const ResponseStats = struct {
     top_of_book: u32 = 0,
     rejects: u32 = 0,
     parse_errors: u32 = 0,
+    packets_received: u32 = 0, // Track UDP packets for batching stats
 
     pub fn total(self: ResponseStats) u32 {
         return self.acks + self.cancel_acks + self.trades + self.top_of_book + self.rejects;
@@ -46,6 +50,10 @@ const ResponseStats = struct {
             try stderr.print("Parse errors:    {d}\n", .{self.parse_errors});
         }
         try stderr.print("Total messages:  {d}\n", .{self.total()});
+        if (self.packets_received > 0 and self.total() > self.packets_received) {
+            const msgs_per_packet = self.total() / self.packets_received;
+            try stderr.print("UDP packets:     {d} (~{d} msgs/packet)\n", .{ self.packets_received, msgs_per_packet });
+        }
     }
 
     pub fn printValidation(self: ResponseStats, expected_acks: u32, expected_trades: u32, stderr: anytype) !void {
@@ -610,7 +618,9 @@ fn runBurstStress(client: *EngineClient, stderr: anytype, count: u32) !void {
 // Response Handling
 // ============================================================
 
-/// Drain all responses from server and count them by type
+/// Drain all responses from server and count them by type.
+/// Handles both single-message UDP packets and batched packets containing
+/// multiple newline-delimited CSV messages.
 fn drainResponses(client: *EngineClient, timeout_ms: u32) !ResponseStats {
     var stats = ResponseStats{};
 
@@ -622,7 +632,7 @@ fn drainResponses(client: *EngineClient, timeout_ms: u32) !ResponseStats {
 
     // Keep reading until timeout
     while (timestamp.now() - start_time < timeout_ns) {
-        const msg = recvMessage(client) catch |err| {
+        const packet_stats = recvAndCountMessages(client) catch |err| {
             if (err == error.Timeout or err == error.WouldBlock) {
                 // No more messages available, wait a bit and try again
                 std.time.sleep(10 * std.time.ns_per_ms);
@@ -632,39 +642,89 @@ fn drainResponses(client: *EngineClient, timeout_ms: u32) !ResponseStats {
             break;
         };
 
-        if (msg) |m| {
-            switch (m.msg_type) {
-                .ack => stats.acks += 1,
-                .cancel_ack => stats.cancel_acks += 1,
-                .trade => stats.trades += 1,
-                .top_of_book => stats.top_of_book += 1,
-            }
-        } else {
-            // null means no message, wait a bit
-            std.time.sleep(10 * std.time.ns_per_ms);
-        }
+        // Accumulate stats from this packet
+        stats.acks += packet_stats.acks;
+        stats.cancel_acks += packet_stats.cancel_acks;
+        stats.trades += packet_stats.trades;
+        stats.top_of_book += packet_stats.top_of_book;
+        stats.rejects += packet_stats.rejects;
+        stats.parse_errors += packet_stats.parse_errors;
+        stats.packets_received += 1;
     }
 
     return stats;
 }
 
-/// Try to receive a single message (returns null if none available)
-fn recvMessage(client: *EngineClient) !?OutputMessage {
+/// Receive one packet and count ALL messages in it (handles batched responses).
+/// Returns stats for this single packet.
+fn recvAndCountMessages(client: *EngineClient) !ResponseStats {
+    var stats = ResponseStats{};
     const proto = client.getProtocol();
 
     if (client.tcp_client) |*tcp_client| {
         const raw_data = tcp_client.recv() catch |err| {
             return err;
         };
-        return parseMessage(raw_data, proto);
+        // TCP is already framed, single message
+        if (parseMessage(raw_data, proto)) |m| {
+            countMessage(&stats, m);
+        }
     } else if (client.udp_client) |*udp_client| {
         const raw_data = udp_client.recv() catch |err| {
             return err;
         };
-        return parseMessage(raw_data, proto);
+
+        // UDP packet may contain multiple CSV messages (batched)
+        // Parse ALL newline-delimited messages from the packet
+        if (proto == .binary) {
+            // Binary protocol - single message per packet
+            if (parseMessage(raw_data, proto)) |m| {
+                countMessage(&stats, m);
+            }
+        } else {
+            // CSV protocol - may have multiple messages separated by newlines
+            var remaining = raw_data;
+            while (remaining.len > 0) {
+                // Find next newline
+                const newline_pos = std.mem.indexOfScalar(u8, remaining, '\n');
+
+                if (newline_pos) |pos| {
+                    // Parse this line (including the newline for the parser)
+                    const line = remaining[0 .. pos + 1];
+                    if (line.len > 1) { // Skip empty lines
+                        if (csv.parseOutput(line)) |m| {
+                            countMessage(&stats, m);
+                        } else |_| {
+                            stats.parse_errors += 1;
+                        }
+                    }
+                    remaining = remaining[pos + 1 ..];
+                } else {
+                    // No more newlines - try to parse remaining data
+                    if (remaining.len > 0) {
+                        if (csv.parseOutput(remaining)) |m| {
+                            countMessage(&stats, m);
+                        } else |_| {
+                            // May be incomplete, that's OK
+                        }
+                    }
+                    break;
+                }
+            }
+        }
     }
 
-    return null;
+    return stats;
+}
+
+/// Count a single message into stats
+fn countMessage(stats: *ResponseStats, msg: OutputMessage) void {
+    switch (msg.msg_type) {
+        .ack => stats.acks += 1,
+        .cancel_ack => stats.cancel_acks += 1,
+        .trade => stats.trades += 1,
+        .top_of_book => stats.top_of_book += 1,
+    }
 }
 
 fn parseMessage(raw_data: []const u8, proto: engine_client.Protocol) ?OutputMessage {
@@ -711,12 +771,40 @@ fn recvAndPrintResponses(client: *EngineClient, stderr: anytype) !void {
                 break;
             };
 
-            try printRawResponse(raw_data, proto, stderr);
+            // Print all messages in the packet (may be batched)
+            try printBatchedResponses(raw_data, proto, stderr);
             response_count += 1;
         }
 
         if (response_count == 0) {
             try stderr.print("[No UDP response received]\n", .{});
+        }
+    }
+}
+
+/// Print all messages from a potentially batched UDP packet
+fn printBatchedResponses(raw_data: []const u8, proto: engine_client.Protocol, stderr: anytype) !void {
+    if (proto == .binary) {
+        try printRawResponse(raw_data, proto, stderr);
+        return;
+    }
+
+    // CSV - parse and print each newline-delimited message
+    var remaining = raw_data;
+    while (remaining.len > 0) {
+        const newline_pos = std.mem.indexOfScalar(u8, remaining, '\n');
+
+        if (newline_pos) |pos| {
+            const line = remaining[0 .. pos + 1];
+            if (line.len > 1) {
+                try printRawResponse(line, proto, stderr);
+            }
+            remaining = remaining[pos + 1 ..];
+        } else {
+            if (remaining.len > 0) {
+                try printRawResponse(remaining, proto, stderr);
+            }
+            break;
         }
     }
 }

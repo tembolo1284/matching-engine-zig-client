@@ -1,12 +1,14 @@
 //! UDP transport layer.
-//! No framing needed - each UDP packet is one message.
+//! Supports both single-message packets and batched packets (multiple CSV messages).
 
 const std = @import("std");
 const socket = @import("socket.zig");
 
 pub const UdpClient = struct {
     sock: socket.UdpSocket,
-    recv_buf: [1500]u8 = undefined, // MTU-sized buffer
+    /// Receive buffer - sized for batched responses (multiple messages per packet)
+    /// Server may send up to ~1400 bytes per packet containing many CSV messages
+    recv_buf: [2048]u8 = undefined,
 
     const Self = @This();
 
@@ -22,9 +24,11 @@ pub const UdpClient = struct {
     pub fn initWithTimeout(host: []const u8, port: u16, recv_timeout_ms: u32) !Self {
         const addr = try socket.Address.parseIpv4(host, port);
 
-        // Create socket WITH receive timeout so recv() doesn't block forever
+        // Create socket with LARGE kernel buffers to prevent drops under load
         var sock = try socket.UdpSocket.init(.{
             .recv_timeout_ms = recv_timeout_ms,
+            .recv_buffer_size = socket.LARGE_RECV_BUFFER, // 8MB kernel buffer
+            .send_buffer_size = socket.LARGE_SEND_BUFFER, // 4MB kernel buffer
         });
 
         // Bind to ephemeral port so we can receive responses
@@ -41,7 +45,7 @@ pub const UdpClient = struct {
         _ = try self.sock.send(data);
     }
 
-    /// Receive a message (with timeout)
+    /// Receive a packet (may contain multiple CSV messages if server is batching)
     /// Returns the received data, or error.WouldBlock on timeout
     pub fn recv(self: *Self) ![]const u8 {
         const n = try self.sock.recv(&self.recv_buf);
@@ -60,5 +64,5 @@ pub const UdpClient = struct {
 
 test "UdpClient struct size" {
     const size = @sizeOf(UdpClient);
-    try std.testing.expect(size < 2000); // Should be under 2KB
+    try std.testing.expect(size < 3000); // Should be under 3KB
 }

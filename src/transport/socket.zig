@@ -25,11 +25,16 @@ pub const Options = struct {
     tcp_nodelay: bool = true,
 
     /// Receive buffer size (0 = system default)
+    /// For high-throughput UDP, use 8MB+ to prevent kernel drops
     recv_buffer_size: u32 = 0,
 
     /// Send buffer size (0 = system default)
     send_buffer_size: u32 = 0,
 };
+
+/// Default large buffer size for high-throughput scenarios
+pub const LARGE_RECV_BUFFER: u32 = 8 * 1024 * 1024; // 8MB
+pub const LARGE_SEND_BUFFER: u32 = 4 * 1024 * 1024; // 4MB
 
 pub const SocketError = error{
     CreateFailed,
@@ -103,6 +108,15 @@ pub const UdpSocket = struct {
         try applyOptions(handle, options);
 
         return .{ .handle = handle };
+    }
+
+    /// Create UDP socket with large buffers for high-throughput scenarios
+    pub fn initHighThroughput(recv_timeout_ms: u32) SocketError!Self {
+        return init(.{
+            .recv_timeout_ms = recv_timeout_ms,
+            .recv_buffer_size = LARGE_RECV_BUFFER,
+            .send_buffer_size = LARGE_SEND_BUFFER,
+        });
     }
 
     /// Bind to local address for receiving
