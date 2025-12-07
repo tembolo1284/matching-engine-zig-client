@@ -1,7 +1,6 @@
 # Matching Engine Zig Client - Makefile
 # ======================================
 # Default: TCP + Binary protocol (production-like)
-# Use --csv flag or -csv targets for CSV protocol
 
 # Configuration
 HOST ?= 127.0.0.1
@@ -9,14 +8,20 @@ PORT ?= 1234
 SCENARIO ?= i
 ZIG ?= zig
 BINARY := ./zig-out/bin/me-client
+QUIET ?=
 
-# Build modes
+# Build modes: Debug, ReleaseSafe, ReleaseFast, ReleaseSmall
 MODE ?= ReleaseFast
-# Options: Debug, ReleaseSafe, ReleaseFast, ReleaseSmall
 
-.PHONY: all build clean clean-global help run \
+# Quiet flag (set QUIET=1 for high-volume tests)
+QUIET_FLAG := $(if $(filter 1,$(QUIET)),--quiet,)
+
+.PHONY: all build clean rebuild help \
+        run interactive \
         run-tcp run-tcp-csv run-udp run-udp-csv \
-        scenario-% stress-% interactive \
+        scenario-1 scenario-2 scenario-3 \
+        stress-1k stress-10k stress-100k \
+        match-1k match-10k match-100k match-250k match-500k \
         test check fmt
 
 # ============================================================================
@@ -31,147 +36,113 @@ build:
 	@echo "Build complete: $(BINARY)"
 
 clean:
-	@echo "=== Cleaning local build artifacts ==="
+	@echo "=== Cleaning build artifacts ==="
 	@rm -rf .zig-cache zig-out
-	@echo "Done!"
-
-clean-global: clean
-	@echo "=== Cleaning global Zig cache ==="
-	@rm -rf $(HOME)/.cache/zig 2>/dev/null || true
-	@rm -rf $(LOCALAPPDATA)/zig 2>/dev/null || true
 	@echo "Done!"
 
 rebuild: clean build
 
 # ============================================================================
-# Run Targets - Default is Binary protocol
+# Run Targets
 # ============================================================================
 
-# Interactive mode (auto-detect)
 run: build
-	$(BINARY) $(HOST) $(PORT) $(SCENARIO)
+	$(BINARY) $(QUIET_FLAG) $(HOST) $(PORT) $(SCENARIO)
 
 interactive: build
 	$(BINARY) $(HOST) $(PORT) i
 
-# TCP (binary by default - production mode)
+# TCP (binary = production, csv = debug)
 run-tcp: build
-	$(BINARY) --tcp --binary $(HOST) $(PORT) $(SCENARIO)
+	$(BINARY) --tcp --binary $(QUIET_FLAG) $(HOST) $(PORT) $(SCENARIO)
 
 run-tcp-csv: build
-	$(BINARY) --tcp --csv $(HOST) $(PORT) $(SCENARIO)
+	$(BINARY) --tcp --csv $(QUIET_FLAG) $(HOST) $(PORT) $(SCENARIO)
 
-# UDP (binary by default)
+# UDP
 run-udp: build
-	$(BINARY) --udp --binary $(HOST) $(PORT) $(SCENARIO)
+	$(BINARY) --udp --binary $(QUIET_FLAG) $(HOST) $(PORT) $(SCENARIO)
 
 run-udp-csv: build
-	$(BINARY) --udp --csv $(HOST) $(PORT) $(SCENARIO)
+	$(BINARY) --udp --csv $(QUIET_FLAG) $(HOST) $(PORT) $(SCENARIO)
 
 # ============================================================================
 # Basic Scenarios (1-3)
 # ============================================================================
 
-# Simple orders
 scenario-1: build
+	@echo "=== Scenario 1: Simple Orders ==="
 	$(BINARY) --tcp --binary $(HOST) $(PORT) 1
 
-scenario-1-csv: build
-	$(BINARY) --tcp --csv $(HOST) $(PORT) 1
-
-# Matching trade
 scenario-2: build
+	@echo "=== Scenario 2: Matching Trade ==="
 	$(BINARY) --tcp --binary $(HOST) $(PORT) 2
 
-scenario-2-csv: build
-	$(BINARY) --tcp --csv $(HOST) $(PORT) 2
-
-# Cancel order
 scenario-3: build
+	@echo "=== Scenario 3: Cancel Order ==="
 	$(BINARY) --tcp --binary $(HOST) $(PORT) 3
 
 # ============================================================================
-# Stress Tests - Order Volume (scenarios 10-14)
+# Unmatched Stress Tests (10-12) - Input Throughput
 # ============================================================================
 
 stress-1k: build
-	@echo "=== Stress Test: 1K orders ==="
-	$(BINARY) --tcp --binary $(HOST) $(PORT) 10
+	@echo "=== Unmatched Stress: 1K orders ==="
+	$(BINARY) --tcp --binary $(QUIET_FLAG) $(HOST) $(PORT) 10
 
 stress-10k: build
-	@echo "=== Stress Test: 10K orders ==="
-	$(BINARY) --tcp --binary $(HOST) $(PORT) 11
+	@echo "=== Unmatched Stress: 10K orders ==="
+	$(BINARY) --tcp --binary $(QUIET_FLAG) $(HOST) $(PORT) 11
 
 stress-100k: build
-	@echo "=== Stress Test: 100K orders ==="
-	$(BINARY) --tcp --binary $(HOST) $(PORT) 12
+	@echo "=== Unmatched Stress: 100K orders ==="
+	$(BINARY) --tcp --binary $(QUIET_FLAG) $(HOST) $(PORT) 12
 
-stress-1m: build
-	@echo "=== Stress Test: 1M orders ==="
-	$(BINARY) --tcp --binary $(HOST) $(PORT) 13
+# UDP variants
+stress-1k-udp: build
+	$(BINARY) --udp --csv $(QUIET_FLAG) $(HOST) 1235 10
 
-stress-10m: build
-	@echo "=== EXTREME Stress Test: 10M orders ==="
-	@echo "Warning: This may take a while and use significant memory"
-	$(BINARY) --tcp --binary $(HOST) $(PORT) 14
+stress-10k-udp: build
+	$(BINARY) --udp --csv $(QUIET_FLAG) $(HOST) 1235 11
+
+stress-100k-udp: build
+	$(BINARY) --udp --csv $(QUIET_FLAG) $(HOST) 1235 12
 
 # ============================================================================
-# Stress Tests - Matching (scenarios 20-21)
+# Matching Stress Tests (20-24) - Trade Throughput - KEY BENCHMARK
 # ============================================================================
 
 match-1k: build
-	@echo "=== Matching Stress: 1K trade pairs ==="
-	$(BINARY) --tcp --binary $(HOST) $(PORT) 20
+	@echo "=== Matching Stress: 1K trades (2K orders) ==="
+	$(BINARY) --tcp --binary $(QUIET_FLAG) $(HOST) $(PORT) 20
 
 match-10k: build
-	@echo "=== Matching Stress: 10K trade pairs ==="
-	$(BINARY) --tcp --binary $(HOST) $(PORT) 21
+	@echo "=== Matching Stress: 10K trades (20K orders) ==="
+	$(BINARY) --tcp --binary $(QUIET_FLAG) $(HOST) $(PORT) 21
 
-# ============================================================================
-# Stress Tests - Multi-Symbol (scenario 30)
-# ============================================================================
+match-100k: build
+	@echo "=== Matching Stress: 100K trades (200K orders) ==="
+	$(BINARY) --tcp --binary $(QUIET_FLAG) $(HOST) $(PORT) 22
 
-multi-symbol: build
-	@echo "=== Multi-Symbol Stress: 10K orders ==="
-	$(BINARY) --tcp --binary $(HOST) $(PORT) 30
+match-250k: build
+	@echo "=== Matching Stress: 250K trades (500K orders) ==="
+	@echo "Tip: Use QUIET=1 for cleaner output"
+	$(BINARY) --tcp --binary $(QUIET_FLAG) $(HOST) $(PORT) 23
 
-# ============================================================================
-# Burst Mode - No Throttling (scenarios 40-41)
-# ============================================================================
+match-500k: build
+	@echo "=== Matching Stress: 500K trades (1M orders) ==="
+	@echo "Tip: Use QUIET=1 for cleaner output"
+	$(BINARY) --tcp --binary $(QUIET_FLAG) $(HOST) $(PORT) 24
 
-burst-100k: build
-	@echo "=== Burst Mode: 100K orders (no throttling) ==="
-	$(BINARY) --tcp --binary $(HOST) $(PORT) 40
+# UDP matching variants
+match-1k-udp: build
+	$(BINARY) --udp --csv $(QUIET_FLAG) $(HOST) 1235 20
 
-burst-1m: build
-	@echo "=== Burst Mode: 1M orders (no throttling) ==="
-	$(BINARY) --tcp --binary $(HOST) $(PORT) 41
+match-10k-udp: build
+	$(BINARY) --udp --csv $(QUIET_FLAG) $(HOST) 1235 21
 
-# ============================================================================
-# UDP Variants of Stress Tests
-# ============================================================================
-
-stress-1k-udp: build
-	$(BINARY) --udp --binary $(HOST) $(PORT) 10
-
-stress-10k-udp: build
-	$(BINARY) --udp --binary $(HOST) $(PORT) 11
-
-stress-100k-udp: build
-	$(BINARY) --udp --binary $(HOST) $(PORT) 12
-
-burst-100k-udp: build
-	$(BINARY) --udp --binary $(HOST) $(PORT) 40
-
-# ============================================================================
-# CSV Variants (for debugging/visibility)
-# ============================================================================
-
-stress-1k-csv: build
-	$(BINARY) --tcp --csv $(HOST) $(PORT) 10
-
-stress-10k-csv: build
-	$(BINARY) --tcp --csv $(HOST) $(PORT) 11
+match-100k-udp: build
+	$(BINARY) --udp --csv $(QUIET_FLAG) $(HOST) 1235 22
 
 # ============================================================================
 # Development & Testing
@@ -188,102 +159,89 @@ check:
 fmt:
 	@echo "=== Formatting Code ==="
 	$(ZIG) fmt src/
-	$(ZIG) fmt tests/ 2>/dev/null || true
 
 # ============================================================================
-# Benchmarking Suite
+# Benchmarking
 # ============================================================================
 
 bench: build
-	@echo "=== Running Benchmark Suite ==="
+	@echo "=== Quick Benchmark (1K orders, all modes) ==="
 	@echo ""
 	@echo "--- TCP Binary ---"
-	@$(BINARY) --tcp --binary $(HOST) $(PORT) 10
-	@echo ""
-	@echo "--- TCP CSV ---"
-	@$(BINARY) --tcp --csv $(HOST) $(PORT) 10
-	@echo ""
-	@echo "--- UDP Binary ---"
-	@$(BINARY) --udp --binary $(HOST) $(PORT) 10
+	@$(BINARY) --tcp --binary --quiet $(HOST) $(PORT) 10
 	@echo ""
 	@echo "--- UDP CSV ---"
-	@$(BINARY) --udp --csv $(HOST) $(PORT) 10
+	@$(BINARY) --udp --csv --quiet $(HOST) 1235 10
 
-bench-full: build
-	@echo "=== Full Benchmark Suite (100K each) ==="
-	@for proto in tcp udp; do \
-		for fmt in binary csv; do \
-			echo ""; \
-			echo "--- $$proto $$fmt ---"; \
-			$(BINARY) --$$proto --$$fmt $(HOST) $(PORT) 12; \
-		done \
-	done
+bench-match: build
+	@echo "=== Matching Benchmark ==="
+	@echo ""
+	@echo "--- 1K Trades ---"
+	@$(BINARY) --tcp --binary --quiet $(HOST) $(PORT) 20
+	@echo ""
+	@echo "--- 10K Trades ---"
+	@$(BINARY) --tcp --binary --quiet $(HOST) $(PORT) 21
 
 # ============================================================================
 # Help
 # ============================================================================
 
 help:
-	@echo "Matching Engine Zig Client - Makefile"
-	@echo "======================================"
+	@echo "Matching Engine Zig Client"
+	@echo "=========================="
 	@echo ""
 	@echo "Configuration (override with VAR=value):"
-	@echo "  HOST=$(HOST)      Server host"
-	@echo "  PORT=$(PORT)          Server port"
-	@echo "  SCENARIO=$(SCENARIO)        Test scenario (i=interactive)"
-	@echo "  MODE=$(MODE)   Build optimization level"
+	@echo "  HOST=$(HOST)        Server host"
+	@echo "  PORT=$(PORT)            TCP port (UDP uses 1235)"
+	@echo "  SCENARIO=$(SCENARIO)          Scenario number or 'i' for interactive"
+	@echo "  QUIET=1             Suppress progress output"
+	@echo "  MODE=$(MODE)     Build optimization"
 	@echo ""
-	@echo "Core Targets:"
-	@echo "  make build         Build the client (ReleaseFast)"
-	@echo "  make clean         Remove local build artifacts"
-	@echo "  make clean-global  Also remove global Zig cache"
-	@echo "  make rebuild       Clean and build"
+	@echo "Build:"
+	@echo "  make build          Build client"
+	@echo "  make clean          Remove build artifacts"
+	@echo "  make rebuild        Clean and build"
 	@echo ""
-	@echo "Run Targets (Binary protocol = default):"
-	@echo "  make run           Auto-detect transport/protocol"
-	@echo "  make run-tcp       TCP + Binary (production)"
-	@echo "  make run-tcp-csv   TCP + CSV (debug)"
-	@echo "  make run-udp       UDP + Binary"
-	@echo "  make run-udp-csv   UDP + CSV (debug)"
-	@echo "  make interactive   Interactive mode"
+	@echo "Run:"
+	@echo "  make run            Auto-detect (TCP/binary)"
+	@echo "  make run-tcp        TCP + Binary"
+	@echo "  make run-tcp-csv    TCP + CSV"
+	@echo "  make run-udp        UDP + Binary"
+	@echo "  make run-udp-csv    UDP + CSV"
+	@echo "  make interactive    Interactive mode"
 	@echo ""
 	@echo "Basic Scenarios:"
-	@echo "  make scenario-1    Simple orders (buy + sell + flush)"
-	@echo "  make scenario-2    Matching trade"
-	@echo "  make scenario-3    Cancel order"
+	@echo "  make scenario-1     Simple orders (no match)"
+	@echo "  make scenario-2     Matching trade"
+	@echo "  make scenario-3     Cancel order"
 	@echo ""
-	@echo "Stress Tests (TCP Binary):"
-	@echo "  make stress-1k     1,000 orders"
-	@echo "  make stress-10k    10,000 orders"
-	@echo "  make stress-100k   100,000 orders"
-	@echo "  make stress-1m     1,000,000 orders"
-	@echo "  make stress-10m    10,000,000 orders (EXTREME)"
+	@echo "Unmatched Stress (input throughput):"
+	@echo "  make stress-1k      1K orders"
+	@echo "  make stress-10k     10K orders"
+	@echo "  make stress-100k    100K orders"
 	@echo ""
-	@echo "Matching Stress:"
-	@echo "  make match-1k      1,000 trade pairs"
-	@echo "  make match-10k     10,000 trade pairs"
+	@echo "Matching Stress (trade throughput) - KEY BENCHMARK:"
+	@echo "  make match-1k       1K trades   (2K orders)"
+	@echo "  make match-10k      10K trades  (20K orders)"
+	@echo "  make match-100k     100K trades (200K orders)"
+	@echo "  make match-250k     250K trades (500K orders)"
+	@echo "  make match-500k     500K trades (1M orders)"
 	@echo ""
-	@echo "Burst Mode (no throttling):"
-	@echo "  make burst-100k    100K orders, max speed"
-	@echo "  make burst-1m      1M orders, max speed"
-	@echo ""
-	@echo "UDP Stress Variants:"
+	@echo "UDP Variants:"
 	@echo "  make stress-1k-udp, stress-10k-udp, stress-100k-udp"
-	@echo "  make burst-100k-udp"
-	@echo ""
-	@echo "CSV Variants (for debugging):"
-	@echo "  make stress-1k-csv, stress-10k-csv"
+	@echo "  make match-1k-udp, match-10k-udp, match-100k-udp"
 	@echo ""
 	@echo "Benchmarking:"
-	@echo "  make bench         Quick benchmark (1K, all modes)"
-	@echo "  make bench-full    Full benchmark (100K, all modes)"
+	@echo "  make bench          Quick benchmark (1K)"
+	@echo "  make bench-match    Matching benchmark (1K, 10K)"
 	@echo ""
 	@echo "Development:"
-	@echo "  make test          Run unit tests"
-	@echo "  make check         Check build"
-	@echo "  make fmt           Format source code"
+	@echo "  make test           Run unit tests"
+	@echo "  make check          Check build"
+	@echo "  make fmt            Format source code"
 	@echo ""
 	@echo "Examples:"
-	@echo "  make run-tcp SCENARIO=2          Run scenario 2 over TCP"
-	@echo "  make stress-100k HOST=10.0.0.5   Stress test remote server"
-	@echo "  make build MODE=Debug            Debug build"
+	@echo "  make match-100k                    Run 100K matching test"
+	@echo "  make match-250k QUIET=1            Large test, quiet mode"
+	@echo "  make run-tcp SCENARIO=22           Run specific scenario"
+	@echo "  make stress-100k HOST=10.0.0.5     Test remote server"
