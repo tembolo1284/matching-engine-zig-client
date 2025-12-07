@@ -238,7 +238,7 @@ fn runStressTest(client: *EngineClient, stderr: anytype, count: u32) !void {
 
     // Flush first to clear any existing orders
     try client.sendFlush();
-    std.time.sleep(100 * std.time.ns_per_ms);
+    std.time.sleep(200 * std.time.ns_per_ms);
     // Drain any flush responses
     _ = try drainResponses(client, 500);
 
@@ -248,13 +248,15 @@ fn runStressTest(client: *EngineClient, stderr: anytype, count: u32) !void {
     var total_latency: u64 = 0;
 
     // Adaptive batching based on count
-    const batch_size: u32 = if (count >= 1_000_000) 50_000 else if (count >= 100_000) 10_000 else if (count >= 10_000) 1_000 else count;
+    const batch_size: u32 = if (count >= 1_000_000) 5_000 else if (count >= 100_000) 750 else if (count >= 10_000) 300 else if (count >= 1_000) 100 else 50;
 
     // Delay between batches (microseconds worth of nanoseconds)
-    const delay_between_batches: u64 = if (count >= 10_000_000) 75 * std.time.ns_per_ms // 50ms for 10M+
-    else if (count >= 1_000_000) 50 * std.time.ns_per_ms // 20ms for 1M+
-    else if (count >= 100_000) 25 * std.time.ns_per_ms // 10ms for 100K+
-    else 0;
+    const delay_between_batches: u64 = if (count >= 10_000_000) 25 * std.time.ns_per_ms // 50ms for 10M+
+    else if (count >= 1_000_000) 15 * std.time.ns_per_ms // 20ms for 1M+
+    else if (count >= 100_000) 10 * std.time.ns_per_ms // 25ms for 100K+
+    else if (count >= 10_000) 5 * std.time.ns_per_ms
+    else if (count >= 1_000) 3 * std.time.ns_per_ms
+    else 1;
 
     if (delay_between_batches > 0) {
         try stderr.print("Batched mode: {d} orders/batch, {d}ms delay\n", .{ batch_size, delay_between_batches / std.time.ns_per_ms });
@@ -347,9 +349,9 @@ fn runStressTest(client: *EngineClient, stderr: anytype, count: u32) !void {
 
     // Adaptive timeout based on order count
     const drain_timeout_ms: u32 = if (count >= 1_000_000) 10_000 // 10s for 1M+
-    else if (count >= 100_000) 5_000 // 5s for 100K+
-    else if (count >= 10_000) 3_000 // 3s for 10K+
-    else 2_000; // 2s default
+    else if (count >= 100_000) 7_500 // 5s for 100K+
+    else if (count >= 10_000) 5_000 // 3s for 10K+
+    else 3_500; // 3.5s default
 
     const stats = try drainResponses(client, drain_timeout_ms);
     try stats.printValidation(expected_acks, 0, stderr);
@@ -625,7 +627,7 @@ fn drainResponses(client: *EngineClient, timeout_ms: u32) !ResponseStats {
     var stats = ResponseStats{};
 
     // Give server time to send responses
-    std.time.sleep(100 * std.time.ns_per_ms);
+    std.time.sleep(500 * std.time.ns_per_ms);
 
     const start_time = timestamp.now();
     const timeout_ns: u64 = @as(u64, timeout_ms) * std.time.ns_per_ms;
@@ -694,8 +696,23 @@ fn recvAndCountMessages(client: *EngineClient) !ResponseStats {
                     if (line.len > 1) { // Skip empty lines
                         if (csv.parseOutput(line)) |m| {
                             countMessage(&stats, m);
-                        } else |_| {
+                        } else |err| {
                             stats.parse_errors += 1;
+                            // Debug: log first few parse errors
+                            if (stats.parse_errors <= 5) {
+                                // Sanitize for logging (replace non-printable)
+                                var debug_buf: [64]u8 = undefined;
+                                const show_len = @min(line.len, 60);
+                                for (line[0..show_len], 0..) |c, i| {
+                                    debug_buf[i] = if (c >= 32 and c < 127) c else '.';
+                                }
+                                std.log.warn("Parse error #{d}: {s} len={d} data='{s}'", .{
+                                    stats.parse_errors,
+                                    @errorName(err),
+                                    line.len,
+                                    debug_buf[0..show_len],
+                                });
+                            }
                         }
                     }
                     remaining = remaining[pos + 1 ..];

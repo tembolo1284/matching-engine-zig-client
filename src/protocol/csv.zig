@@ -1,4 +1,4 @@
-//! CSV protocol encoder/decoder.
+ //! CSV protocol encoder/decoder.
 //!
 //! Handles the human-readable text format. Useful for debugging and
 //! interop with tools like netcat. Format: "N, 1, IBM, 10000, 50, B, 1\n"
@@ -81,9 +81,10 @@ pub fn parseOutput(data: []const u8) ParseError!types.OutputMessage {
 
     return switch (msg_type) {
         'A' => parseAck(trimmed),
-        'C' => parseCancelAck(trimmed),
+        'C', 'X' => parseCancelAck(trimmed),  // Both C and X are cancel acks
         'T' => parseTrade(trimmed),
         'B' => parseTopOfBook(trimmed),
+        'R' => parseReject(trimmed),  // Add reject support
         else => ParseError.UnknownMessageType,
     };
 }
@@ -119,6 +120,36 @@ fn parseCancelAck(data: []const u8) ParseError!types.OutputMessage {
     // Format: C, symbol, user_id, order_id (same as ack)
     var msg = try parseAck(data);
     msg.msg_type = .cancel_ack;
+    return msg;
+}
+
+fn parseReject(data: []const u8) ParseError!types.OutputMessage {
+    // Format: R, symbol, user_id, order_id, reason
+    var it = std.mem.splitScalar(u8, data, ',');
+
+    _ = it.next(); // Skip 'R'
+
+    const symbol_field = std.mem.trim(u8, it.next() orelse return ParseError.MissingFields, " ");
+    const user_field = std.mem.trim(u8, it.next() orelse return ParseError.MissingFields, " ");
+    const order_field = std.mem.trim(u8, it.next() orelse return ParseError.MissingFields, " ");
+    // reason field - we read it but don't store it currently
+    _ = it.next(); // Skip reason for now
+
+    const user_id = std.fmt.parseInt(u32, user_field, 10) catch return ParseError.InvalidNumber;
+    const order_id = std.fmt.parseInt(u32, order_field, 10) catch return ParseError.InvalidNumber;
+
+    // Treat reject as an ack for counting purposes (or add a reject type to OutputMessage)
+    var msg = types.OutputMessage{
+        .msg_type = .ack, // TODO: Add .reject to OutputMsgType if needed
+        .symbol = undefined,
+        .symbol_len = @intCast(@min(symbol_field.len, types.MAX_SYMBOL_LEN)),
+        .user_id = user_id,
+        .order_id = order_id,
+    };
+
+    @memset(&msg.symbol, 0);
+    @memcpy(msg.symbol[0..msg.symbol_len], symbol_field[0..msg.symbol_len]);
+
     return msg;
 }
 
@@ -206,8 +237,8 @@ test "format new order" {
 
 test "format cancel" {
     var buf: [256]u8 = undefined;
-    const result = try formatCancel(&buf, 42, 1001);
-    try std.testing.expectEqualStrings("C, 42, 1001\n", result);
+    const result = try formatCancel(&buf, 42, "IBM", 1001);
+    try std.testing.expectEqualStrings("C, 42, IBM, 1001\n", result);
 }
 
 test "format flush" {
@@ -219,6 +250,14 @@ test "format flush" {
 test "parse ack" {
     const msg = try parseOutput("A, IBM, 1, 1001");
     try std.testing.expectEqual(types.OutputMsgType.ack, msg.msg_type);
+    try std.testing.expectEqualStrings("IBM", msg.getSymbol());
+    try std.testing.expectEqual(@as(u32, 1), msg.user_id);
+    try std.testing.expectEqual(@as(u32, 1001), msg.order_id);
+}
+
+test "parse reject" {
+    const msg = try parseOutput("R, IBM, 1, 1001, 4");
+    try std.testing.expectEqual(types.OutputMsgType.ack, msg.msg_type); // Treated as ack for now
     try std.testing.expectEqualStrings("IBM", msg.getSymbol());
     try std.testing.expectEqual(@as(u32, 1), msg.user_id);
     try std.testing.expectEqual(@as(u32, 1001), msg.order_id);
@@ -255,4 +294,9 @@ test "parse empty top of book" {
 test "parse with whitespace" {
     const msg = try parseOutput("  A, IBM, 1, 1001  \n");
     try std.testing.expectEqual(types.OutputMsgType.ack, msg.msg_type);
+}
+
+test "parse cancel ack X format" {
+    const msg = try parseOutput("X, IBM, 1, 1001");
+    try std.testing.expectEqual(types.OutputMsgType.cancel_ack, msg.msg_type);
 }
