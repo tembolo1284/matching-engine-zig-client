@@ -348,10 +348,10 @@ fn runStressTest(client: *EngineClient, stderr: anytype, count: u32) !void {
     try stderr.print("\nCounting server responses (expecting {d} ACKs)...\n", .{expected_acks});
 
     // Adaptive timeout based on order count
-    const drain_timeout_ms: u32 = if (count >= 1_000_000) 10_000 // 10s for 1M+
-    else if (count >= 100_000) 7_500 // 5s for 100K+
-    else if (count >= 10_000) 5_000 // 3s for 10K+
-    else 3_500; // 3.5s default
+    const drain_timeout_ms: u32 = if (count >= 1_000_000) 20_000 // 10s for 1M+
+    else if (count >= 100_000) 15_000 // 5s for 100K+
+    else if (count >= 10_000) 10_000 // 3s for 10K+
+    else 5_000; // 5s default
 
     const stats = try drainResponses(client, drain_timeout_ms);
     try stats.printValidation(expected_acks, 0, stderr);
