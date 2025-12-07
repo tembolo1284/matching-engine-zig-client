@@ -484,7 +484,7 @@ fn drainResponses(client: *EngineClient, timeout_ms: u32) !ResponseStats {
     var stats = ResponseStats{};
 
     // Initial settle time
-    std.time.sleep(500 * std.time.ns_per_ms);
+    std.time.sleep(100 * std.time.ns_per_ms);
 
     const start_time = timestamp.now();
     const timeout_ns: u64 = @as(u64, timeout_ms) * std.time.ns_per_ms;
@@ -492,7 +492,7 @@ fn drainResponses(client: *EngineClient, timeout_ms: u32) !ResponseStats {
     while (timestamp.now() - start_time < timeout_ns) {
         const packet_stats = recvAndCountMessages(client) catch |err| {
             if (err == error.Timeout or err == error.WouldBlock) {
-                std.time.sleep(10 * std.time.ns_per_ms);
+                std.time.sleep(5 * std.time.ns_per_ms);
                 continue;
             }
             break;

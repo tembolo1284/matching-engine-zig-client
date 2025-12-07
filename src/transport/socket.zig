@@ -33,7 +33,7 @@ pub const Options = struct {
 };
 
 /// Default large buffer size for high-throughput scenarios
-pub const LARGE_RECV_BUFFER: u32 = 8 * 1024 * 1024; // 8MB
+pub const LARGE_RECV_BUFFER: u32 = 16 * 1024 * 1024; // 8MB
 pub const LARGE_SEND_BUFFER: u32 = 4 * 1024 * 1024; // 4MB
 
 pub const SocketError = error{
