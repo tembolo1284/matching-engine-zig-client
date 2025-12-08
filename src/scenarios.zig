@@ -635,12 +635,15 @@ fn drainResponses(client: *EngineClient, timeout_ms: u32) !ResponseStats {
     var consecutive_empty: u32 = 0;
 
     while (timestamp.now() - start_time < timeout_ns) {
-        const packet_stats = recvAndCountMessages(client) catch |err| {
+        // Use tryRecv (non-blocking) instead of blocking recv
+        const packet_stats = tryRecvAndCount(client) catch |err| {
             if (err == error.Timeout or err == error.WouldBlock) {
                 consecutive_empty += 1;
-                if (consecutive_empty > 100) {
-                    std.time.sleep(10 * std.time.ns_per_ms);
+                if (consecutive_empty > 500) {
+                    // ~500ms of no data after all sends complete = we're done
+                    break;
                 }
+                std.time.sleep(1 * std.time.ns_per_ms);
                 continue;
             }
             break;
@@ -651,6 +654,10 @@ fn drainResponses(client: *EngineClient, timeout_ms: u32) !ResponseStats {
             stats.add(packet_stats);
         } else {
             consecutive_empty += 1;
+            if (consecutive_empty > 500) {
+                break;
+            }
+            std.time.sleep(1 * std.time.ns_per_ms);
         }
     }
 
