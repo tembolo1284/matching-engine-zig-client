@@ -116,6 +116,10 @@ pub fn run(client: *EngineClient, scenario: u8, stderr: anytype) !void {
         23 => try runMatchingStress(client, stderr, 250_000),
         24 => try runMatchingStress(client, stderr, 500_000),
         25 => try runMatchingStress(client, stderr, 250_000_000),
+        // Dual-processor scenarios (IBM on A-M, NVDA on N-Z)
+        30 => try runDualProcessorStress(client, stderr, 500_000),
+        31 => try runDualProcessorStress(client, stderr, 1_000_000),
+        32 => try runDualProcessorStress(client, stderr, 100_000_000),
         else => {
             try printAvailableScenarios(stderr);
             return error.UnknownScenario;
@@ -127,13 +131,17 @@ pub fn printAvailableScenarios(stderr: anytype) !void {
     try stderr.print("Available scenarios:\n", .{});
     try stderr.print("\nBasic: 1 (orders), 2 (trade), 3 (cancel)\n", .{});
     try stderr.print("\nUnmatched: 10 (1K), 11 (10K), 12 (100K)\n", .{});
-    try stderr.print("\nMatching ★ KEY BENCHMARK:\n", .{});
+    try stderr.print("\nMatching (single processor - IBM):\n", .{});
     try stderr.print("  20 - 1K trades\n", .{});
     try stderr.print("  21 - 10K trades\n", .{});
     try stderr.print("  22 - 100K trades\n", .{});
     try stderr.print("  23 - 250K trades\n", .{});
     try stderr.print("  24 - 500K trades\n", .{});
     try stderr.print("  25 - 250M trades ★★★ LEGENDARY ★★★\n", .{});
+    try stderr.print("\nDual-Processor (IBM + NVDA):\n", .{});
+    try stderr.print("  30 - 500K trades  (250K each)\n", .{});
+    try stderr.print("  31 - 1M trades    (500K each)\n", .{});
+    try stderr.print("  32 - 100M trades  (50M each) ★★★ ULTIMATE ★★★\n", .{});
 }
 
 // ============================================================
@@ -228,20 +236,18 @@ fn runStressTest(client: *EngineClient, stderr: anytype, count: u32) !void {
 }
 
 // ============================================================
-// Matching Stress Test - INTERLEAVED SEND/RECEIVE
+// Matching Stress Test - SINGLE PROCESSOR (IBM)
 // ============================================================
 
 fn runMatchingStress(client: *EngineClient, stderr: anytype, trades: u64) !void {
     const quiet = global_config.quiet;
     const orders = trades * 2;
 
-    // Epic banner for legendary test
     if (trades >= 100_000_000) {
         try stderr.print("\n", .{});
         try stderr.print("╔══════════════════════════════════════════════════════════╗\n", .{});
         try stderr.print("║  ★★★ LEGENDARY MATCHING STRESS TEST ★★★                  ║\n", .{});
         try stderr.print("║  {d}M TRADES ({d}M ORDERS)                              ║\n", .{ trades / 1_000_000, orders / 1_000_000 });
-        try stderr.print("║  Blood, Sweat, and Tears Mode                            ║\n", .{});
         try stderr.print("╚══════════════════════════════════════════════════════════╝\n", .{});
         try stderr.print("\n", .{});
     } else {
@@ -260,22 +266,20 @@ fn runMatchingStress(client: *EngineClient, stderr: anytype, trades: u64) !void 
     std.time.sleep(200 * std.time.ns_per_ms);
     _ = try drainResponses(client, 500);
 
-    // Throttling parameters
-    const pairs_per_batch: u64 = if (trades >= 100_000_000) 50
-        else if (trades >= 1_000_000) 100
-        else if (trades >= 250_000) 100
-        else if (trades >= 100_000) 150
-        else if (trades >= 10_000) 300
-        else 500;
+    // BALANCED MODE - 4x faster than ultra-conservative, but safe
+    // Target: ~10-15K trades/sec
+    const pairs_per_batch: u64 = if (trades >= 100_000_000) 200
+        else if (trades >= 1_000_000) 200
+        else if (trades >= 100_000) 200
+        else if (trades >= 10_000) 150
+        else 100;
 
-    const delay_between_batches_ns: u64 = if (trades >= 100_000_000) 50 * std.time.ns_per_ms
-        else if (trades >= 1_000_000) 40 * std.time.ns_per_ms
-        else if (trades >= 250_000) 30 * std.time.ns_per_ms
-        else if (trades >= 100_000) 25 * std.time.ns_per_ms
-        else if (trades >= 10_000) 15 * std.time.ns_per_ms
+    const delay_between_batches_ns: u64 = if (trades >= 100_000_000) 15 * std.time.ns_per_ms
+        else if (trades >= 1_000_000) 15 * std.time.ns_per_ms
+        else if (trades >= 100_000) 15 * std.time.ns_per_ms
+        else if (trades >= 10_000) 10 * std.time.ns_per_ms
         else 5 * std.time.ns_per_ms;
 
-    // Progress: 5% for huge tests, 10% for others
     const progress_pct: u64 = if (trades >= 1_000_000) 5 else 10;
     const progress_interval = trades / (100 / progress_pct);
 
@@ -296,13 +300,11 @@ fn runMatchingStress(client: *EngineClient, stderr: anytype, trades: u64) !void 
         const buy_oid: u32 = @intCast((i * 2 + 1) % 0xFFFFFFFF);
         const sell_oid: u32 = @intCast((i * 2 + 2) % 0xFFFFFFFF);
 
-        // Buy order
         client.sendNewOrder(1, "IBM", price, 10, .buy, buy_oid) catch {
             send_errors += 1;
             continue;
         };
 
-        // Matching sell order
         client.sendNewOrder(1, "IBM", price, 10, .sell, sell_oid) catch {
             send_errors += 1;
             continue;
@@ -310,7 +312,6 @@ fn runMatchingStress(client: *EngineClient, stderr: anytype, trades: u64) !void 
 
         pairs_sent += 1;
 
-        // Progress
         if (!quiet and progress_interval > 0 and i > 0 and i / progress_interval > last_progress) {
             last_progress = i / progress_interval;
             const pct = (i * 100) / trades;
@@ -321,18 +322,18 @@ fn runMatchingStress(client: *EngineClient, stderr: anytype, trades: u64) !void 
             });
         }
 
-        // INTERLEAVED RECEIVE - drain between batches using tryRecv
         if (i > 0 and i % pairs_per_batch == 0) {
-            // Non-blocking drain: poll with short timeout, get what's available
+            // Drain aggressively - each pair produces ~5 outputs
             var drained: u64 = 0;
-            const max_drain = pairs_per_batch * 8;
-            while (drained < max_drain) : (drained += 1) {
-                // Use tryRecv with 1ms timeout - returns null if no data
+            const drain_target = pairs_per_batch * 6;
+            while (drained < drain_target) : (drained += 1) {
                 const packet_stats = tryRecvAndCount(client) catch break;
-                if (packet_stats.total() == 0) break; // No more data available
+                if (packet_stats.total() == 0) break;
                 running_stats.add(packet_stats);
             }
-            std.time.sleep(delay_between_batches_ns);
+            if (delay_between_batches_ns > 0) {
+                std.time.sleep(delay_between_batches_ns);
+            }
         }
     }
 
@@ -358,17 +359,17 @@ fn runMatchingStress(client: *EngineClient, stderr: anytype, trades: u64) !void 
 
     const expected_acks = orders_sent;
     const expected_trades = pairs_sent;
-    const expected_total = expected_acks + expected_trades + expected_trades * 2; // ACKs + trades + ToB
+    const expected_total = expected_acks + expected_trades + expected_trades * 2;
     const remaining = expected_total -| running_stats.total();
     try stderr.print("Final drain (expecting ~{d} more)...\n", .{remaining});
 
-    // Final drain - longer for huge tests
-    const drain_timeout_ms: u32 = if (trades >= 100_000_000) 600_000
-        else if (trades >= 1_000_000) 300_000
-        else if (trades >= 250_000) 120_000
-        else if (trades >= 100_000) 90_000
-        else if (trades >= 10_000) 45_000
-        else 30_000;
+    // Longer timeouts - need to drain millions of messages
+    const drain_timeout_ms: u32 = if (trades >= 100_000_000) 1800_000  // 30 min
+        else if (trades >= 1_000_000) 600_000   // 10 min
+        else if (trades >= 500_000) 300_000     // 5 min
+        else if (trades >= 250_000) 180_000     // 3 min
+        else if (trades >= 100_000) 120_000     // 2 min
+        else 60_000;                            // 1 min
 
     const final_stats = try drainResponses(client, drain_timeout_ms);
     
@@ -378,12 +379,161 @@ fn runMatchingStress(client: *EngineClient, stderr: anytype, trades: u64) !void 
 
     try total_stats.printValidation(expected_acks, expected_trades, stderr);
 
-    // Victory banner
     if (trades >= 100_000_000 and total_stats.trades >= expected_trades) {
+        try stderr.print("\n╔══════════════════════════════════════════════════════════╗\n", .{});
+        try stderr.print("║  ★★★ LEGENDARY ACHIEVEMENT UNLOCKED ★★★                  ║\n", .{});
+        try stderr.print("╚══════════════════════════════════════════════════════════╝\n", .{});
+    }
+
+    try client.sendFlush();
+    std.time.sleep(200 * std.time.ns_per_ms);
+}
+
+// ============================================================
+// Dual-Processor Stress Test - IBM (A-M) + NVDA (N-Z)
+// ============================================================
+
+fn runDualProcessorStress(client: *EngineClient, stderr: anytype, trades: u64) !void {
+    const quiet = global_config.quiet;
+    const orders = trades * 2;
+    const trades_per_proc = trades / 2;
+
+    if (trades >= 10_000_000) {
         try stderr.print("\n", .{});
         try stderr.print("╔══════════════════════════════════════════════════════════╗\n", .{});
-        try stderr.print("║  ★★★ LEGENDARY ACHIEVEMENT UNLOCKED ★★★                  ║\n", .{});
-        try stderr.print("║  {d}M TRADES MATCHED SUCCESSFULLY!                      ║\n", .{total_stats.trades / 1_000_000});
+        try stderr.print("║  ★★★ DUAL-PROCESSOR STRESS TEST ★★★                      ║\n", .{});
+        try stderr.print("║  {d}M TRADES ({d}M ORDERS)                              ║\n", .{ trades / 1_000_000, orders / 1_000_000 });
+        try stderr.print("║  Processor 0 (A-M): IBM  - {d}M trades                   ║\n", .{ trades_per_proc / 1_000_000 });
+        try stderr.print("║  Processor 1 (N-Z): NVDA - {d}M trades                   ║\n", .{ trades_per_proc / 1_000_000 });
+        try stderr.print("╚══════════════════════════════════════════════════════════╝\n", .{});
+        try stderr.print("\n", .{});
+    } else {
+        try stderr.print("=== Dual-Processor Stress: {d} Trades ===\n\n", .{trades});
+    }
+
+    if (trades >= 1_000_000) {
+        try stderr.print("Target: {d}M trades ({d}M orders)\n", .{ trades / 1_000_000, orders / 1_000_000 });
+    } else if (trades >= 1_000) {
+        try stderr.print("Target: {d}K trades ({d}K orders)\n", .{ trades / 1_000, orders / 1_000 });
+    }
+    try stderr.print("  Processor 0 (A-M): IBM  - {d} trades\n", .{trades_per_proc});
+    try stderr.print("  Processor 1 (N-Z): NVDA - {d} trades\n", .{trades_per_proc});
+
+    try client.sendFlush();
+    std.time.sleep(200 * std.time.ns_per_ms);
+    _ = try drainResponses(client, 500);
+
+    // BALANCED MODE for dual-processor - same as single
+    const pairs_per_batch: u64 = if (trades >= 10_000_000) 200
+        else if (trades >= 1_000_000) 200
+        else 200;
+
+    const delay_between_batches_ns: u64 = if (trades >= 10_000_000) 15 * std.time.ns_per_ms
+        else if (trades >= 1_000_000) 15 * std.time.ns_per_ms
+        else 15 * std.time.ns_per_ms;
+
+    const progress_pct: u64 = if (trades >= 1_000_000) 5 else 10;
+    const progress_interval = trades / (100 / progress_pct);
+
+    try stderr.print("Throttling: {d} pairs/batch, {d}ms delay (interleaved recv)\n", .{ 
+        pairs_per_batch, delay_between_batches_ns / std.time.ns_per_ms 
+    });
+
+    var send_errors: u64 = 0;
+    var pairs_sent: u64 = 0;
+    var running_stats = ResponseStats{};
+    var last_progress: u64 = 0;
+
+    const symbols = [_][]const u8{ "IBM", "NVDA" };
+
+    const start_time = timestamp.now();
+
+    var i: u64 = 0;
+    while (i < trades) : (i += 1) {
+        const symbol = symbols[i % 2];
+        const price: u32 = 100 + @as(u32, @intCast(i % 50));
+        const buy_oid: u32 = @intCast((i * 2 + 1) % 0xFFFFFFFF);
+        const sell_oid: u32 = @intCast((i * 2 + 2) % 0xFFFFFFFF);
+
+        client.sendNewOrder(1, symbol, price, 10, .buy, buy_oid) catch {
+            send_errors += 1;
+            continue;
+        };
+
+        client.sendNewOrder(1, symbol, price, 10, .sell, sell_oid) catch {
+            send_errors += 1;
+            continue;
+        };
+
+        pairs_sent += 1;
+
+        if (!quiet and progress_interval > 0 and i > 0 and i / progress_interval > last_progress) {
+            last_progress = i / progress_interval;
+            const pct = (i * 100) / trades;
+            const elapsed = (timestamp.now() - start_time) / 1_000_000;
+            const rate: u64 = if (elapsed > 0) pairs_sent * 1000 / elapsed else 0;
+            try stderr.print("  {d}% | {d} pairs | {d} ms | {d} trades/sec | recv'd: {d}\n", .{ 
+                pct, pairs_sent, elapsed, rate, running_stats.total() 
+            });
+        }
+
+        if (i > 0 and i % pairs_per_batch == 0) {
+            // Drain aggressively - each pair produces ~5 outputs
+            var drained: u64 = 0;
+            const drain_target = pairs_per_batch * 6;
+            while (drained < drain_target) : (drained += 1) {
+                const packet_stats = tryRecvAndCount(client) catch break;
+                if (packet_stats.total() == 0) break;
+                running_stats.add(packet_stats);
+            }
+            if (delay_between_batches_ns > 0) {
+                std.time.sleep(delay_between_batches_ns);
+            }
+        }
+    }
+
+    const end_time = timestamp.now();
+    const total_time = if (end_time >= start_time) end_time - start_time else 0;
+    const orders_sent = pairs_sent * 2;
+
+    try stderr.print("\n=== Send Results ===\n", .{});
+    try stderr.print("Trade pairs:     {d}\n", .{pairs_sent});
+    try stderr.print("Orders sent:     {d}\n", .{orders_sent});
+    try stderr.print("Send errors:     {d}\n", .{send_errors});
+    try printTime(stderr, "Total time:      ", total_time);
+
+    if (total_time > 0) {
+        const throughput: u64 = orders_sent * 1_000_000_000 / total_time;
+        const trade_rate: u64 = pairs_sent * 1_000_000_000 / total_time;
+        try stderr.print("\n=== Throughput ===\n", .{});
+        try printThroughput(stderr, "Orders/sec:  ", throughput);
+        try printThroughput(stderr, "Trades/sec:  ", trade_rate);
+    }
+
+    try stderr.print("\nReceived during send: {d} messages\n", .{running_stats.total()});
+
+    const expected_acks = orders_sent;
+    const expected_trades = pairs_sent;
+    const expected_total = expected_acks + expected_trades + expected_trades * 2;
+    const remaining = expected_total -| running_stats.total();
+    try stderr.print("Final drain (expecting ~{d} more)...\n", .{remaining});
+
+    // Longer timeouts for dual-processor
+    const drain_timeout_ms: u32 = if (trades >= 10_000_000) 1800_000   // 30 min
+        else if (trades >= 1_000_000) 600_000   // 10 min
+        else 300_000;                           // 5 min
+
+    const final_stats = try drainResponses(client, drain_timeout_ms);
+    
+    var total_stats = ResponseStats{};
+    total_stats.add(running_stats);
+    total_stats.add(final_stats);
+
+    try total_stats.printValidation(expected_acks, expected_trades, stderr);
+
+    if (trades >= 10_000_000 and total_stats.trades >= expected_trades) {
+        try stderr.print("\n╔══════════════════════════════════════════════════════════╗\n", .{});
+        try stderr.print("║  ★★★ ULTIMATE DUAL-PROCESSOR ACHIEVEMENT ★★★             ║\n", .{});
         try stderr.print("╚══════════════════════════════════════════════════════════╝\n", .{});
     }
 
@@ -421,16 +571,14 @@ fn printThroughput(stderr: anytype, prefix: []const u8, rate: u64) !void {
 // Response Handling
 // ============================================================
 
-/// Non-blocking receive - uses tryRecv with 1ms timeout
 fn tryRecvAndCount(client: *EngineClient) !ResponseStats {
     var stats = ResponseStats{};
     const proto = client.getProtocol();
 
     if (client.tcp_client) |*tcp_client| {
-        // Use tryRecv with 1ms timeout
         const maybe_data = tcp_client.tryRecv(1) catch |err| {
             if (err == error.WouldBlock or err == error.Timeout) {
-                return stats; // Empty stats = no data
+                return stats;
             }
             return err;
         };
@@ -441,7 +589,6 @@ fn tryRecvAndCount(client: *EngineClient) !ResponseStats {
             }
         }
     } else if (client.udp_client) |*udp_client| {
-        // UDP is already non-blocking with short timeout
         const raw_data = udp_client.recv() catch {
             return stats;
         };
@@ -451,7 +598,6 @@ fn tryRecvAndCount(client: *EngineClient) !ResponseStats {
                 countMessage(&stats, m);
             }
         } else {
-            // CSV batched
             var remaining = raw_data;
             while (remaining.len > 0) {
                 const newline_pos = std.mem.indexOfScalar(u8, remaining, '\n');
@@ -480,7 +626,6 @@ fn tryRecvAndCount(client: *EngineClient) !ResponseStats {
     return stats;
 }
 
-/// Blocking drain with timeout
 fn drainResponses(client: *EngineClient, timeout_ms: u32) !ResponseStats {
     var stats = ResponseStats{};
     std.time.sleep(100 * std.time.ns_per_ms);
@@ -494,7 +639,6 @@ fn drainResponses(client: *EngineClient, timeout_ms: u32) !ResponseStats {
             if (err == error.Timeout or err == error.WouldBlock) {
                 consecutive_empty += 1;
                 if (consecutive_empty > 100) {
-                    // No data for a while, slow down polling
                     std.time.sleep(10 * std.time.ns_per_ms);
                 }
                 continue;
@@ -513,7 +657,6 @@ fn drainResponses(client: *EngineClient, timeout_ms: u32) !ResponseStats {
     return stats;
 }
 
-/// Standard blocking receive
 fn recvAndCountMessages(client: *EngineClient) !ResponseStats {
     var stats = ResponseStats{};
     const proto = client.getProtocol();
@@ -646,6 +789,6 @@ fn printResponse(msg: OutputMessage, stderr: anytype) !void {
 }
 
 test "scenario numbers valid" {
-    const valid = [_]u8{ 1, 2, 3, 10, 11, 12, 20, 21, 22, 23, 24, 25 };
+    const valid = [_]u8{ 1, 2, 3, 10, 11, 12, 20, 21, 22, 23, 24, 25, 30, 31, 32 };
     for (valid) |s| _ = s;
 }
