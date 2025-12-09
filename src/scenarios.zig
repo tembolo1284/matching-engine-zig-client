@@ -158,6 +158,7 @@ fn runScenario1(client: *EngineClient, stderr: anytype) !void {
     try recvAndPrintResponses(client, stderr);
     
     // Cleanup
+    try stderr.print("\n[FLUSH] Cleaning up server state\n", .{});
     try client.sendFlush();
     std.time.sleep(100 * std.time.ns_per_ms);
 }
@@ -172,6 +173,7 @@ fn runScenario2(client: *EngineClient, stderr: anytype) !void {
     try recvAndPrintResponses(client, stderr);
     
     // Cleanup
+    try stderr.print("\n[FLUSH] Cleaning up server state\n", .{});
     try client.sendFlush();
     std.time.sleep(100 * std.time.ns_per_ms);
 }
@@ -186,6 +188,7 @@ fn runScenario3(client: *EngineClient, stderr: anytype) !void {
     try recvAndPrintResponses(client, stderr);
     
     // Cleanup
+    try stderr.print("\n[FLUSH] Cleaning up server state\n", .{});
     try client.sendFlush();
     std.time.sleep(100 * std.time.ns_per_ms);
 }
@@ -247,6 +250,7 @@ fn runStressTest(client: *EngineClient, stderr: anytype, count: u32) !void {
     try stats.printValidation(expected_acks, 0, stderr);
     
     // Cleanup
+    try stderr.print("\n[FLUSH] Cleaning up server state\n", .{});
     try client.sendFlush();
     std.time.sleep(200 * std.time.ns_per_ms);
 }
@@ -401,6 +405,7 @@ fn runMatchingStress(client: *EngineClient, stderr: anytype, trades: u64) !void 
         try stderr.print("╚══════════════════════════════════════════════════════════╝\n", .{});
     }
 
+    try stderr.print("\n[FLUSH] Cleaning up server state\n", .{});
     try client.sendFlush();
     std.time.sleep(200 * std.time.ns_per_ms);
 }
@@ -553,6 +558,7 @@ fn runDualProcessorStress(client: *EngineClient, stderr: anytype, trades: u64) !
         try stderr.print("╚══════════════════════════════════════════════════════════╝\n", .{});
     }
 
+    try stderr.print("\n[FLUSH] Cleaning up server state\n", .{});
     try client.sendFlush();
     std.time.sleep(200 * std.time.ns_per_ms);
 }
