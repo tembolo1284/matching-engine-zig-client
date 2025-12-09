@@ -80,8 +80,10 @@ pub fn isBinaryProtocol(data: []const u8) bool {
 /// Parsed `OutputMessage` or decode error.
 pub fn decodeOutput(data: []const u8) DecodeError!types.OutputMessage {
     // Pre-conditions (Power of Ten Rule 5)
-    std.debug.assert(data.ptr != undefined);
+    // Assertion 1: Data pointer should be valid (not null)
+    std.debug.assert(@intFromPtr(data.ptr) != 0);
 
+    // Assertion 2: Checked below with proper error return
     if (data.len < 2) return DecodeError.MessageTooShort;
     if (data[0] != types.MAGIC_BYTE) return DecodeError.InvalidMagic;
 

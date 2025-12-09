@@ -108,8 +108,8 @@ pub const OrderBuilder = struct {
     /// Parameters:
     ///   s - Symbol string (e.g., "IBM", "AAPL")
     pub fn sym(self: Self, s: []const u8) Self {
-        // Assertion 1: Symbol should not be null pointer
-        std.debug.assert(s.ptr != undefined);
+        // Assertion 1: Symbol pointer should be valid
+        std.debug.assert(@intFromPtr(s.ptr) != 0);
 
         // Assertion 2: Symbol length should be reasonable
         std.debug.assert(s.len <= types.MAX_SYMBOL_LEN);

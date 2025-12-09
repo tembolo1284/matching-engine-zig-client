@@ -158,7 +158,8 @@ pub fn formatFlush(buf: []u8) ParseError![]const u8 {
 /// Parsed `OutputMessage` or parse error.
 pub fn parseOutput(data: []const u8) ParseError!types.OutputMessage {
     // Pre-condition (Power of Ten Rule 5)
-    std.debug.assert(data.ptr != undefined);
+    // Assertion 1: Data pointer should be valid
+    std.debug.assert(@intFromPtr(data.ptr) != 0);
 
     // Trim whitespace and newlines
     const trimmed = std.mem.trim(u8, data, " \t\r\n");

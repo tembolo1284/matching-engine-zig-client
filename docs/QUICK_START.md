@@ -1,235 +1,196 @@
 # Quick Start Guide
 
-Get the Zig matching engine client building and running step by step.
+Get up and running with the Zig Matching Engine Client in under 5 minutes.
 
 ## Prerequisites
 
-### Install Zig
+- **Zig 0.13.0+** - [Install Zig](https://ziglang.org/download/)
+- **Zig Matching Engine** - The server to connect to
 
-**macOS:**
-```bash
-brew install zig
-```
+## Step 1: Start the Server
 
-**Linux (Ubuntu/Debian):**
-```bash
-# Download latest from https://ziglang.org/download/
-wget https://ziglang.org/download/0.13.0/zig-linux-x86_64-0.13.0.tar.xz
-tar -xf zig-linux-x86_64-0.13.0.tar.xz
-export PATH=$PATH:$(pwd)/zig-linux-x86_64-0.13.0
-```
-
-**Windows:**
-```powershell
-# Download from https://ziglang.org/download/
-# Or use scoop:
-scoop install zig
-```
-
-**Verify installation:**
-```bash
-zig version
-# Expected: 0.13.0 or similar
-```
-
-## Step 1: Build
+In a terminal, start the matching engine:
 
 ```bash
-cd matching-engine-zig-client
-
-# Debug build
-zig build
-
-# If successful, binary is at:
-ls -la zig-out/bin/me-client
+cd ~/matching-engine-zig
+make run-threaded
 ```
 
-### Common Build Errors
+You should see:
+```
+╔════════════════════════════════════════════╗
+║     Zig Matching Engine v0.1.0             ║
+╠════════════════════════════════════════════╣
+║  TCP:       0.0.0.0:1234                   ║
+║  UDP:       0.0.0.0:1235                   ║
+║  Multicast: 239.255.0.1:1236               ║
+╚════════════════════════════════════════════╝
+```
 
-**Error: "file not found" for imports**
-- Check that all source files exist in the correct paths
-- Verify the directory structure matches what's expected
+## Step 2: Build the Client
 
-**Error: struct size mismatch (comptime error)**
-- The `comptime` blocks verify struct sizes match the C server
-- If sizes don't match, adjust padding fields
-
-**Error: "expected type" or similar type errors**
-- Zig is very strict about types
-- Check that all `@intCast`, `@ptrCast` are correct
-
-## Step 2: Run Tests
+In another terminal:
 
 ```bash
-# Run all inline tests
-zig build test
-
-# Run protocol-specific tests
-zig build test-protocol
-
-# Test a single file directly
-zig test src/protocol/types.zig
+cd ~/matching-engine-zig-client
+make build
 ```
 
-### Test Output
+## Step 3: Test Connection
 
-Successful output looks like:
-```
-All 42 tests passed.
-```
-
-If tests fail, you'll see which specific test and assertion failed.
-
-## Step 3: Try the CLI
+Run the simple orders scenario:
 
 ```bash
-# Show help
-./zig-out/bin/me-client --help
-
-# Or run directly through build system
-zig build run -- --help
+make scenario-1
 ```
 
 Expected output:
 ```
-Matching Engine Zig Client
-
-USAGE:
-    me-client [OPTIONS] <COMMAND>
-
-COMMANDS:
-    order       Send a new order
-    cancel      Cancel an order
-    flush       Cancel all orders
-    subscribe   Subscribe to multicast market data
-    benchmark   Run latency benchmark
-...
+Connecting to 127.0.0.1:1234...
+Connected (tcp/binary)
+=== Scenario 1: Simple Orders ===
+[SEND] N, 1, IBM, 10000, 100, B, 1
+[RECV] A, IBM, 1, 1
+[RECV] B, IBM, B, 10000, 100, 0, 0
+[SEND] N, 1, IBM, 10000, 100, S, 2
+[RECV] A, IBM, 1, 2
+[RECV] T, IBM, 10000, 100, 1, 2
+[RECV] B, IBM, S, 0, 0, 0, 0
+=== Disconnecting ===
 ```
 
-## Step 4: Connect to Server
+🎉 **Success!** The client is working.
 
-First, make sure your C matching engine is running:
+## Step 4: Interactive Mode
+
+Try manual order entry:
 
 ```bash
-# In another terminal, start the matching engine
-./matching_engine --tcp --port 1234
+make interactive
 ```
 
-Then connect with the Zig client:
+Enter commands at the prompt:
+
+```
+> buy IBM 100.00 50
+→ BUY IBM 100.00@50 (order 1)
+[RECV] A, IBM, 1, 1
+[RECV] B, IBM, B, 10000, 50, 0, 0
+
+> sell IBM 100.00 50
+→ SELL IBM 100.00@50 (order 2)
+[RECV] A, IBM, 1, 2
+[RECV] T, IBM, 10000, 50, 1, 2
+[RECV] B, IBM, S, 0, 0, 0, 0
+
+> quit
+```
+
+## Step 5: Run Stress Tests
+
+Test with increasing load:
 
 ```bash
-# Send an order
-./zig-out/bin/me-client order --symbol IBM --price 10000 --qty 50 --buy --order-id 1
+# 1,000 trades
+make match-1k
 
-# Expected output:
-# Connecting to 127.0.0.1:1234 (tcp/binary)...
-# Sending order: buy IBM 50@10000 (user=1, oid=1)
-# Order sent.
-# Waiting for response...
-# Response: ACK: IBM user=1 order=1
+# 10,000 trades (recommended first stress test)
+make match-10k
 ```
 
-## Step 5: Test Multicast (Optional)
-
-Start server with multicast:
-```bash
-./matching_engine --tcp --port 1234 --multicast 239.255.0.1:5000
+Expected output for match-10k:
+```
+=== Matching Stress Test: 10000 Trades ===
+Target: 10K trades (20K orders)
+  10% | 1001 pairs | 585 ms | 1711 trades/sec
+  20% | 2001 pairs | 1210 ms | 1653 trades/sec
+  ...
+=== Validation ===
+ACKs:            20000/20000 ✓ PASS
+Trades:          10000/10000 ✓ PASS
+*** TEST PASSED ***
 ```
 
-Subscribe:
-```bash
-./zig-out/bin/me-client subscribe --group 239.255.0.1 --port 5000
-```
+## Common Commands
+
+### Interactive Mode
+
+| Command | Description |
+|---------|-------------|
+| `buy SYMBOL PRICE QTY` | Submit buy order |
+| `sell SYMBOL PRICE QTY` | Submit sell order |
+| `cancel SYMBOL ORDER_ID` | Cancel order |
+| `flush` | Flush server buffers |
+| `quit` | Exit |
+
+### Makefile Targets
+
+| Target | Description |
+|--------|-------------|
+| `make build` | Build release binary |
+| `make test` | Run unit tests |
+| `make interactive` | Interactive mode |
+| `make scenario-N` | Run scenario N (1-5) |
+| `make match-1k` | 1K trade stress test |
+| `make match-10k` | 10K trade stress test |
 
 ## Troubleshooting
 
 ### "Connection refused"
 
-The matching engine server isn't running or wrong port:
+The server isn't running. Start it with:
 ```bash
-# Check if server is listening
-netstat -an | grep 1234
-# or
-lsof -i :1234
+cd ~/matching-engine-zig && make run-threaded
 ```
 
-### Struct size assertion failed
+### "Missing responses" in stress tests
 
-If you see a comptime error like:
-```
-error: comptime: BinaryNewOrder must be exactly 30 bytes
-```
+The client may disconnect before receiving all responses. This is a timing issue with aggressive test parameters. The 10K test should pass reliably; larger tests may need parameter tuning.
 
-This means the struct layout doesn't match. Check:
-1. Field order in the struct
-2. `align(1)` on integer fields
-3. Padding bytes
+### Build errors
 
-### Socket errors on Windows
-
-Windows socket behavior differs slightly. Ensure:
-- `linkLibC()` is called in build.zig
-- Timeouts use milliseconds not timeval
-
-### Cross-compilation issues
-
+Ensure you have Zig 0.13.0 or later:
 ```bash
-# Explicitly specify target
-zig build -Dtarget=x86_64-linux-gnu
-
-# Or use musl for static linking
-zig build -Dtarget=x86_64-linux-musl
+zig version
 ```
 
-## File Checklist
+### Server crashes with "oversized frame"
 
-Make sure all these files exist:
-
-```
-matching-engine-zig-client/
-├── build.zig                          ✓
-├── src/
-│   ├── main.zig                       ✓
-│   ├── protocol/
-│   │   ├── types.zig                  ✓
-│   │   ├── binary.zig                 ✓
-│   │   ├── csv.zig                    ✓
-│   │   └── framing.zig                ✓
-│   ├── transport/
-│   │   ├── socket.zig                 ✓
-│   │   ├── tcp.zig                    ✓
-│   │   ├── udp.zig                    ✓
-│   │   └── multicast.zig              ✓
-│   ├── client/
-│   │   ├── engine_client.zig          ✓
-│   │   └── order_builder.zig          ✓
-│   ├── memory/
-│   │   ├── pool.zig                   ✓
-│   │   └── ring_buffer.zig            ✓
-│   └── util/
-│       └── timestamp.zig              ✓
-└── tests/
-    └── protocol_tests.zig             ✓
-```
+Protocol mismatch. Ensure both client and server use TCP framing. The client defaults to framing mode, which matches the server.
 
 ## Next Steps
 
-Once building:
+1. **Read the Protocol**: See [PROTOCOL.md](PROTOCOL.md) for wire format details
+2. **Understand the Architecture**: See [ARCHITECTURE.md](ARCHITECTURE.md) for design decisions
+3. **Run More Scenarios**: Try scenarios 2-5 for different order flows
+4. **Dual Processor Tests**: Try `make dual-10k` to test both server processors
 
-1. **Run the benchmark**: `./zig-out/bin/me-client benchmark`
-2. **Test with CSV protocol**: Add `--csv` flag
-3. **Try UDP mode**: Add `--udp` flag
-4. **Cross-compile**: `zig build -Dtarget=x86_64-windows`
+## Configuration
+
+### Using UDP Instead of TCP
+
+```bash
+./zig-out/bin/me-client --udp 127.0.0.1 1235 1
+```
+
+Note: UDP uses port 1235 (not 1234).
+
+### Using CSV Protocol
+
+```bash
+./zig-out/bin/me-client --csv 127.0.0.1 1234 1
+```
+
+CSV is human-readable but slower than binary.
+
+### Custom Host/Port
+
+```bash
+./zig-out/bin/me-client 192.168.1.100 5000 1
+```
 
 ## Getting Help
 
-If you hit a compile error:
-
-1. Copy the exact error message
-2. Note which file and line number
-3. Check if it's a known Zig version issue (0.12 vs 0.13 syntax changes)
-
-Common Zig 0.13 changes from 0.12:
-- `@intCast` now requires explicit target type via inference
-- `std.mem.zeroes` replaced by `.{0} ** N` syntax
-- Some std.posix paths changed
+- Check server logs for error messages
+- Review [ARCHITECTURE.md](ARCHITECTURE.md) for design details
+- Submit issues on GitHub

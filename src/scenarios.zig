@@ -266,19 +266,19 @@ fn runMatchingStress(client: *EngineClient, stderr: anytype, trades: u64) !void 
     std.time.sleep(200 * std.time.ns_per_ms);
     _ = try drainResponses(client, 500);
 
-    // BALANCED MODE - 4x faster than ultra-conservative, but safe
-    // Target: ~10-15K trades/sec
-    const pairs_per_batch: u64 = if (trades >= 100_000_000) 200
-        else if (trades >= 1_000_000) 200
-        else if (trades >= 100_000) 200
-        else if (trades >= 10_000) 150
-        else 100;
+    // BALANCED MODE - slower but reliable
+    // Key: We must drain faster than we send to avoid overwhelming server
+    const pairs_per_batch: u64 = if (trades >= 100_000_000) 100
+        else if (trades >= 1_000_000) 100
+        else if (trades >= 100_000) 100
+        else if (trades >= 10_000) 50
+        else 50;
 
-    const delay_between_batches_ns: u64 = if (trades >= 100_000_000) 15 * std.time.ns_per_ms
-        else if (trades >= 1_000_000) 15 * std.time.ns_per_ms
-        else if (trades >= 100_000) 15 * std.time.ns_per_ms
-        else if (trades >= 10_000) 10 * std.time.ns_per_ms
-        else 5 * std.time.ns_per_ms;
+    const delay_between_batches_ns: u64 = if (trades >= 100_000_000) 50 * std.time.ns_per_ms
+        else if (trades >= 1_000_000) 50 * std.time.ns_per_ms
+        else if (trades >= 100_000) 30 * std.time.ns_per_ms
+        else if (trades >= 10_000) 20 * std.time.ns_per_ms
+        else 10 * std.time.ns_per_ms;
 
     const progress_pct: u64 = if (trades >= 1_000_000) 5 else 10;
     const progress_interval = trades / (100 / progress_pct);
@@ -323,17 +323,17 @@ fn runMatchingStress(client: *EngineClient, stderr: anytype, trades: u64) !void 
         }
 
         if (i > 0 and i % pairs_per_batch == 0) {
-            // Drain aggressively - each pair produces ~5 outputs
+            // Drain aggressively - each pair produces ~5 outputs (2 ACKs, 1 trade, 2 TOB)
+            // Drain up to 10x expected to catch up with any backlog
             var drained: u64 = 0;
-            const drain_target = pairs_per_batch * 6;
+            const drain_target = pairs_per_batch * 10;
             while (drained < drain_target) : (drained += 1) {
                 const packet_stats = tryRecvAndCount(client) catch break;
                 if (packet_stats.total() == 0) break;
                 running_stats.add(packet_stats);
             }
-            if (delay_between_batches_ns > 0) {
-                std.time.sleep(delay_between_batches_ns);
-            }
+            // Always delay between batches to let server catch up
+            std.time.sleep(delay_between_batches_ns);
         }
     }
 
@@ -423,14 +423,14 @@ fn runDualProcessorStress(client: *EngineClient, stderr: anytype, trades: u64) !
     std.time.sleep(200 * std.time.ns_per_ms);
     _ = try drainResponses(client, 500);
 
-    // BALANCED MODE for dual-processor - same as single
-    const pairs_per_batch: u64 = if (trades >= 10_000_000) 200
-        else if (trades >= 1_000_000) 200
-        else 200;
+    // BALANCED MODE for dual-processor - slower but reliable
+    const pairs_per_batch: u64 = if (trades >= 10_000_000) 100
+        else if (trades >= 1_000_000) 100
+        else 50;
 
-    const delay_between_batches_ns: u64 = if (trades >= 10_000_000) 15 * std.time.ns_per_ms
-        else if (trades >= 1_000_000) 15 * std.time.ns_per_ms
-        else 15 * std.time.ns_per_ms;
+    const delay_between_batches_ns: u64 = if (trades >= 10_000_000) 50 * std.time.ns_per_ms
+        else if (trades >= 1_000_000) 50 * std.time.ns_per_ms
+        else 20 * std.time.ns_per_ms;
 
     const progress_pct: u64 = if (trades >= 1_000_000) 5 else 10;
     const progress_interval = trades / (100 / progress_pct);
@@ -478,17 +478,17 @@ fn runDualProcessorStress(client: *EngineClient, stderr: anytype, trades: u64) !
         }
 
         if (i > 0 and i % pairs_per_batch == 0) {
-            // Drain aggressively - each pair produces ~5 outputs
+            // Drain aggressively - each pair produces ~5 outputs (2 ACKs, 1 trade, 2 TOB)
+            // Drain up to 10x expected to catch up with any backlog
             var drained: u64 = 0;
-            const drain_target = pairs_per_batch * 6;
+            const drain_target = pairs_per_batch * 10;
             while (drained < drain_target) : (drained += 1) {
                 const packet_stats = tryRecvAndCount(client) catch break;
                 if (packet_stats.total() == 0) break;
                 running_stats.add(packet_stats);
             }
-            if (delay_between_batches_ns > 0) {
-                std.time.sleep(delay_between_batches_ns);
-            }
+            // Always delay between batches to let server catch up
+            std.time.sleep(delay_between_batches_ns);
         }
     }
 
@@ -576,7 +576,7 @@ fn tryRecvAndCount(client: *EngineClient) !ResponseStats {
     const proto = client.getProtocol();
 
     if (client.tcp_client) |*tcp_client| {
-        const maybe_data = tcp_client.tryRecv(1) catch |err| {
+        const maybe_data = tcp_client.tryRecv(10) catch |err| {  // 10ms poll timeout
             if (err == error.WouldBlock or err == error.Timeout) {
                 return stats;
             }
@@ -628,36 +628,69 @@ fn tryRecvAndCount(client: *EngineClient) !ResponseStats {
 
 fn drainResponses(client: *EngineClient, timeout_ms: u32) !ResponseStats {
     var stats = ResponseStats{};
+    
+    // Give server time to start sending responses
     std.time.sleep(100 * std.time.ns_per_ms);
 
     const start_time = timestamp.now();
     const timeout_ns: u64 = @as(u64, timeout_ms) * std.time.ns_per_ms;
     var consecutive_empty: u32 = 0;
+    
+    // Use longer poll timeout and higher empty threshold for reliability
+    const poll_timeout_ms: i32 = 50; // 50ms poll for better batching
+    const max_consecutive_empty: u32 = 100; // 100 * 50ms = 5 seconds of idle
 
     while (timestamp.now() - start_time < timeout_ns) {
-        // Use tryRecv (non-blocking) instead of blocking recv
-        const packet_stats = tryRecvAndCount(client) catch |err| {
-            if (err == error.Timeout or err == error.WouldBlock) {
+        // Use blocking recv with timeout for more reliable draining
+        if (client.tcp_client) |*tcp_client| {
+            const maybe_data = tcp_client.tryRecv(poll_timeout_ms) catch |err| {
+                if (err == error.Timeout or err == error.WouldBlock) {
+                    consecutive_empty += 1;
+                    if (consecutive_empty > max_consecutive_empty) {
+                        break;
+                    }
+                    continue;
+                }
+                break;
+            };
+
+            if (maybe_data) |raw_data| {
+                consecutive_empty = 0;
+                if (parseMessage(raw_data, client.getProtocol())) |m| {
+                    var packet_stats = ResponseStats{};
+                    countMessage(&packet_stats, m);
+                    stats.add(packet_stats);
+                }
+            } else {
                 consecutive_empty += 1;
-                if (consecutive_empty > 500) {
-                    // ~500ms of no data after all sends complete = we're done
+                if (consecutive_empty > max_consecutive_empty) {
                     break;
                 }
-                std.time.sleep(1 * std.time.ns_per_ms);
-                continue;
             }
-            break;
-        };
-
-        if (packet_stats.total() > 0) {
-            consecutive_empty = 0;
-            stats.add(packet_stats);
         } else {
-            consecutive_empty += 1;
-            if (consecutive_empty > 500) {
+            // UDP path - use original tryRecvAndCount
+            const packet_stats = tryRecvAndCount(client) catch |err| {
+                if (err == error.Timeout or err == error.WouldBlock) {
+                    consecutive_empty += 1;
+                    if (consecutive_empty > max_consecutive_empty) {
+                        break;
+                    }
+                    std.time.sleep(5 * std.time.ns_per_ms);
+                    continue;
+                }
                 break;
+            };
+
+            if (packet_stats.total() > 0) {
+                consecutive_empty = 0;
+                stats.add(packet_stats);
+            } else {
+                consecutive_empty += 1;
+                if (consecutive_empty > max_consecutive_empty) {
+                    break;
+                }
+                std.time.sleep(5 * std.time.ns_per_ms);
             }
-            std.time.sleep(1 * std.time.ns_per_ms);
         }
     }
 
