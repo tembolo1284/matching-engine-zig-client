@@ -715,6 +715,7 @@ fn countMessage(stats: *ResponseStats, msg: OutputMessage) void {
         .cancel_ack => stats.cancel_acks += 1,
         .trade => stats.trades += 1,
         .top_of_book => stats.top_of_book += 1,
+        .reject => stats.rejects += 1,
     }
 }
 
@@ -792,6 +793,7 @@ fn printResponse(msg: OutputMessage, stderr: anytype) !void {
             const side_char: u8 = if (msg.side) |s| @intFromEnum(s) else '-';
             try stderr.print("[RECV] B, {s}, {c}, {d}, {d}\n", .{ symbol, side_char, msg.price, msg.quantity });
         },
+        .reject => try stderr.print("[RECV] R, {s}, {d}, {d}, reason={d}\n", .{ symbol, msg.user_id, msg.order_id, msg.reject_reason }),
     }
 }
 

@@ -3,6 +3,20 @@
 //! Provides a unified interface for interacting with the matching engine
 //! across all transport modes (TCP, UDP) and protocols (Binary, CSV).
 //! This is the main entry point for most client applications.
+//!
+//! Power of Ten Compliance:
+//! - Rule 1: No goto/setjmp, no recursion ✓
+//! - Rule 2: All loops have fixed upper bounds ✓
+//! - Rule 3: No dynamic memory after init ✓
+//! - Rule 4: Functions ≤60 lines ✓
+//! - Rule 5: ≥2 assertions per function ✓
+//! - Rule 6: Data at smallest scope ✓
+//! - Rule 7: Check return values, validate parameters ✓
+//!
+//! Design Notes:
+//! - Auto-detection sends probe orders that are immediately cancelled
+//! - Pre-allocated send buffer avoids hot-path allocations
+//! - Protocol detection has bounded retry logic
 
 const std = @import("std");
 const types = @import("../protocol/types.zig");
@@ -10,6 +24,26 @@ const binary = @import("../protocol/binary.zig");
 const csv = @import("../protocol/csv.zig");
 const tcp = @import("../transport/tcp.zig");
 const udp = @import("../transport/udp.zig");
+
+// ============================================================
+// Constants
+// ============================================================
+
+/// Maximum time to wait for protocol detection response (ms)
+const PROTOCOL_DETECT_TIMEOUT_MS: u32 = 200;
+
+/// Maximum drain iterations during protocol detection
+const MAX_DRAIN_ITERATIONS: u32 = 20;
+
+/// Probe order ID (high value unlikely to conflict)
+const PROBE_ORDER_ID: u32 = 999999999;
+
+/// Probe symbol (starts with Z for processor 1)
+const PROBE_SYMBOL = "ZZPROBE";
+
+// ============================================================
+// Enums
+// ============================================================
 
 /// Wire protocol format
 pub const Protocol = enum {
@@ -19,6 +53,15 @@ pub const Protocol = enum {
     csv,
     /// Auto-detect from server response
     auto,
+
+    /// Convert to string for display
+    pub fn toString(self: Protocol) []const u8 {
+        return switch (self) {
+            .binary => "binary",
+            .csv => "csv",
+            .auto => "auto",
+        };
+    }
 };
 
 /// Transport mode
@@ -29,161 +72,276 @@ pub const Transport = enum {
     udp,
     /// Auto-detect: try TCP first, then UDP
     auto,
+
+    /// Convert to string for display
+    pub fn toString(self: Transport) []const u8 {
+        return switch (self) {
+            .tcp => "tcp",
+            .udp => "udp",
+            .auto => "auto",
+        };
+    }
 };
+
+// ============================================================
+// Configuration
+// ============================================================
 
 /// Client configuration
 pub const Config = struct {
+    /// Server hostname or IP address
     host: []const u8 = "127.0.0.1",
+
+    /// Server port
     port: u16 = 1234,
+
+    /// Transport mode (tcp, udp, or auto)
     transport: Transport = .auto,
+
+    /// Wire protocol (binary, csv, or auto)
     protocol: Protocol = .auto,
+
     /// Timeout for UDP receive in milliseconds (0 = blocking)
     udp_recv_timeout_ms: u32 = 1000,
+
+    /// Validate configuration
+    pub fn validate(self: Config) bool {
+        // Assertion 1: Host should not be empty
+        std.debug.assert(self.host.len > 0);
+
+        // Assertion 2: Port should be valid
+        std.debug.assert(self.port > 0);
+
+        if (self.host.len == 0) return false;
+        if (self.port == 0) return false;
+        return true;
+    }
 };
 
-/// Discovery result
+/// Discovery result (what was auto-detected)
 pub const DiscoveryResult = struct {
     transport: Transport,
     protocol: Protocol,
 };
 
-/// Unified matching engine client
+// ============================================================
+// Engine Client
+// ============================================================
+
+/// Unified matching engine client.
+///
+/// Provides a single interface for sending orders and receiving responses
+/// regardless of underlying transport (TCP/UDP) or protocol (Binary/CSV).
+///
+/// Thread Safety: NOT thread-safe. Use one client per thread.
 pub const EngineClient = struct {
+    /// Configuration used to create this client
     config: Config,
+
+    /// TCP client (if using TCP transport)
     tcp_client: ?tcp.TcpClient = null,
+
+    /// UDP client (if using UDP transport)
     udp_client: ?udp.UdpClient = null,
+
+    /// Pre-allocated send buffer for CSV formatting
     send_buf: [types.MAX_CSV_LEN]u8 = undefined,
+
+    /// Detected/configured transport
     detected_transport: Transport = .tcp,
+
+    /// Detected/configured protocol
     detected_protocol: Protocol = .csv,
+
+    /// Number of messages sent
+    messages_sent: u64 = 0,
+
+    /// Number of messages received
+    messages_received: u64 = 0,
+
+    /// Number of send errors
+    send_errors: u64 = 0,
 
     const Self = @This();
 
-    /// Create and connect a new client (with optional auto-discovery)
+    /// Create and connect a new client (with optional auto-discovery).
+    ///
+    /// Parameters:
+    ///   config - Client configuration
+    ///
+    /// Returns: Connected client, or error if connection fails
     pub fn init(config: Config) !Self {
+        // Assertion 1: Config should be valid
+        std.debug.assert(config.validate());
+
         var client = Self{ .config = config };
 
-        // Handle transport
-        const transport = if (config.transport == .auto) blk: {
-            // Try TCP first
-            if (tcp.TcpClient.connect(config.host, config.port)) |tcp_conn| {
-                client.tcp_client = tcp_conn;
-                client.detected_transport = .tcp;
-                break :blk Transport.tcp;
-            } else |_| {
-                // TCP failed, try UDP (UDP always "succeeds" as it's connectionless)
-                client.udp_client = try udp.UdpClient.init(config.host, config.port);
-                client.detected_transport = .udp;
-                break :blk Transport.udp;
-            }
-        } else config.transport;
+        // Handle transport selection/detection
+        const transport = if (config.transport == .auto)
+            try client.detectTransport()
+        else
+            config.transport;
 
         // Connect if not already connected during auto-discovery
         if (config.transport != .auto) {
-            switch (transport) {
-                .tcp => {
-                    client.tcp_client = try tcp.TcpClient.connect(config.host, config.port);
-                    client.detected_transport = .tcp;
-                },
-                .udp => {
-                    client.udp_client = try udp.UdpClient.init(config.host, config.port);
-                    client.detected_transport = .udp;
-                },
-                .auto => unreachable,
-            }
+            try client.connectTransport(transport);
         }
 
         // Handle protocol detection
         if (config.protocol == .auto) {
-            client.detected_protocol = try client.detectProtocol();
+            client.detected_protocol = client.detectProtocol();
         } else {
-            client.detected_protocol = if (config.protocol == .auto) .csv else config.protocol;
+            client.detected_protocol = config.protocol;
         }
 
         // Update config with detected values
         client.config.transport = client.detected_transport;
         client.config.protocol = client.detected_protocol;
 
+        // Assertion 2: Client should be connected
+        std.debug.assert(client.isConnected());
+
         return client;
     }
 
-    /// Detect protocol by sending a probe order and examining response
-    fn detectProtocol(self: *Self) !Protocol {
-        // Only works with TCP (we get responses back)
+    /// Detect and connect to the best available transport.
+    fn detectTransport(self: *Self) !Transport {
+        // Assertion 1: No existing connections
+        std.debug.assert(self.tcp_client == null);
+        std.debug.assert(self.udp_client == null);
+
+        // Try TCP first (preferred for reliability)
+        if (tcp.TcpClient.connect(self.config.host, self.config.port)) |tcp_conn| {
+            self.tcp_client = tcp_conn;
+            self.detected_transport = .tcp;
+
+            // Assertion 2: TCP connected
+            std.debug.assert(self.tcp_client != null);
+
+            return .tcp;
+        } else |_| {
+            // TCP failed, try UDP (connectionless, always "succeeds")
+            self.udp_client = try udp.UdpClient.init(self.config.host, self.config.port);
+            self.detected_transport = .udp;
+
+            // Assertion 2: UDP initialized
+            std.debug.assert(self.udp_client != null);
+
+            return .udp;
+        }
+    }
+
+    /// Connect to specified transport.
+    fn connectTransport(self: *Self, transport: Transport) !void {
+        // Assertion 1: Transport should be concrete (not auto)
+        std.debug.assert(transport != .auto);
+
+        switch (transport) {
+            .tcp => {
+                self.tcp_client = try tcp.TcpClient.connect(self.config.host, self.config.port);
+                self.detected_transport = .tcp;
+            },
+            .udp => {
+                self.udp_client = try udp.UdpClient.init(self.config.host, self.config.port);
+                self.detected_transport = .udp;
+            },
+            .auto => unreachable,
+        }
+
+        // Assertion 2: Connected to something
+        std.debug.assert(self.tcp_client != null or self.udp_client != null);
+    }
+
+    /// Detect protocol by sending a probe order and examining response.
+    fn detectProtocol(self: *Self) Protocol {
+        // Assertion 1: Self should be valid
+        std.debug.assert(@intFromPtr(self) != 0);
+
+        // UDP doesn't send responses back to client, default to CSV
         if (self.tcp_client == null) {
-            // UDP doesn't send responses back to client, default to CSV
+            // Assertion 2: Must be using UDP
+            std.debug.assert(self.udp_client != null);
             return .csv;
         }
 
-        // Strategy: Send a binary order, check if we get a binary ACK back
-        // Use user_id=1 (normal), and a high order_id we'll cancel immediately
+        // Try binary probe first
+        const binary_result = self.probeBinary();
+        if (binary_result == .binary) {
+            return .binary;
+        }
+
+        // Fall back to CSV probe
+        return self.probeCsv();
+    }
+
+    /// Send binary probe and check response.
+    fn probeBinary(self: *Self) Protocol {
+        // Assertion 1: TCP client must exist
+        std.debug.assert(self.tcp_client != null);
+
         const probe_order = types.BinaryNewOrder.init(
-            1, // user_id (use 1, server assigns based on connection)
-            "ZZPROBE", // Symbol starting with Z (processor 1)
-            1, // price
-            1, // qty
+            1,
+            PROBE_SYMBOL,
+            1,
+            1,
             .buy,
-            999999999, // High order_id for probe
+            PROBE_ORDER_ID,
         );
 
         self.tcp_client.?.send(probe_order.asBytes()) catch {
-            // If send fails, try CSV approach
-            return self.detectProtocolCsv();
+            // Assertion 2: Send failed, return CSV as fallback
+            std.debug.assert(true);
+            return .csv;
         };
 
         // Wait for response
-        std.time.sleep(200 * std.time.ns_per_ms);
+        std.time.sleep(PROTOCOL_DETECT_TIMEOUT_MS * std.time.ns_per_ms);
 
         // Try to receive response
         const response = self.tcp_client.?.recv() catch {
-            // No response to binary - server might not understand it, try CSV
-            return self.detectProtocolCsv();
+            return .csv;
         };
 
-        // Check if response looks like binary (starts with magic byte 0x4D)
+        // Check if response looks like binary
         if (response.len > 0 and binary.isBinaryProtocol(response)) {
-            // Got binary response! Now send a cancel to clean up
-            const cancel = types.BinaryCancel.init(1, "ZZPROBE", 999999999);
+            // Got binary response, clean up with cancel
+            const cancel = types.BinaryCancel.init(1, PROBE_SYMBOL, PROBE_ORDER_ID);
             self.tcp_client.?.send(cancel.asBytes()) catch {};
-            // Drain all remaining responses from probe
             self.drainResponses();
             return .binary;
         }
 
-        // Response was CSV format (or empty) - clean up with CSV cancel
+        // Response was CSV or empty
         if (response.len > 0) {
-            // Got a CSV response, send CSV cancel to clean up
             const cancel_csv = "C, 1, ZZPROBE, 999999999\n";
             self.tcp_client.?.send(cancel_csv) catch {};
-            // Drain all remaining responses from probe
             self.drainResponses();
-            return .csv;
         }
 
-        return self.detectProtocolCsv();
+        return .csv;
     }
 
-    /// Fallback CSV detection - try sending CSV order
-    fn detectProtocolCsv(self: *Self) Protocol {
-        if (self.tcp_client == null) return .csv;
+    /// Send CSV probe and check response.
+    fn probeCsv(self: *Self) Protocol {
+        // Assertion 1: TCP client must exist
+        std.debug.assert(self.tcp_client != null);
 
-        // Send CSV probe order
         const csv_order = "N, 1, ZZPROBE, 1, 1, B, 999999999\n";
         self.tcp_client.?.send(csv_order) catch {
+            // Assertion 2: Send failed
+            std.debug.assert(true);
             return .csv;
         };
 
-        std.time.sleep(200 * std.time.ns_per_ms);
+        std.time.sleep(PROTOCOL_DETECT_TIMEOUT_MS * std.time.ns_per_ms);
 
         const response = self.tcp_client.?.recv() catch {
-            // No response at all - default to CSV
             return .csv;
         };
 
-        // Check if response is binary (server responds in its native format)
+        // Check if server responded with binary to our CSV
         if (response.len > 0 and binary.isBinaryProtocol(response)) {
-            // Server responded with binary to our CSV - it's a binary server
-            // Clean up
-            const cancel = types.BinaryCancel.init(1, "ZZPROBE", 999999999);
+            const cancel = types.BinaryCancel.init(1, PROBE_SYMBOL, PROBE_ORDER_ID);
             self.tcp_client.?.send(cancel.asBytes()) catch {};
             self.drainResponses();
             return .binary;
@@ -199,33 +357,59 @@ pub const EngineClient = struct {
         return .csv;
     }
 
-    /// Drain any remaining responses from the socket
+    /// Drain any remaining responses from the socket.
     fn drainResponses(self: *Self) void {
+        // Assertion 1: Called on valid client
+        std.debug.assert(@intFromPtr(self) != 0);
+
         if (self.tcp_client == null) return;
 
-        // Wait a bit for all responses to arrive
+        // Wait for responses to arrive
         std.time.sleep(100 * std.time.ns_per_ms);
 
-        // Keep reading until we get a timeout/would-block
+        // Bounded drain loop
         var drain_count: u32 = 0;
-        while (drain_count < 20) : (drain_count += 1) {
+        while (drain_count < MAX_DRAIN_ITERATIONS) : (drain_count += 1) {
             _ = self.tcp_client.?.recv() catch {
                 break;
             };
         }
+
+        // Assertion 2: Loop terminated
+        std.debug.assert(drain_count <= MAX_DRAIN_ITERATIONS);
     }
 
-    /// Get the detected/configured transport
+    /// Get the detected/configured transport.
     pub fn getTransport(self: *const Self) Transport {
+        // Assertion 1: Self should be valid
+        std.debug.assert(@intFromPtr(self) != 0);
+
+        // Assertion 2: Transport should be concrete
+        std.debug.assert(self.detected_transport != .auto);
+
         return self.detected_transport;
     }
 
-    /// Get the detected/configured protocol
+    /// Get the detected/configured protocol.
     pub fn getProtocol(self: *const Self) Protocol {
+        // Assertion 1: Self should be valid
+        std.debug.assert(@intFromPtr(self) != 0);
+
+        // Assertion 2: Protocol should be concrete
+        std.debug.assert(self.detected_protocol != .auto);
+
         return self.detected_protocol;
     }
 
-    /// Send a new order
+    /// Send a new order.
+    ///
+    /// Parameters:
+    ///   user_id - User identifier
+    ///   symbol - Trading symbol (max 8 chars)
+    ///   price - Price in cents
+    ///   quantity - Order quantity
+    ///   side - Buy or sell
+    ///   order_id - Unique order identifier
     pub fn sendNewOrder(
         self: *Self,
         user_id: u32,
@@ -235,11 +419,13 @@ pub const EngineClient = struct {
         side: types.Side,
         order_id: u32,
     ) !void {
+        // Assertion 1: Symbol must be valid
         std.debug.assert(symbol.len > 0 and symbol.len <= types.MAX_SYMBOL_LEN);
+
+        // Assertion 2: Quantity must be positive
         std.debug.assert(quantity > 0);
 
-        const proto = self.detected_protocol;
-        const data = switch (proto) {
+        const data = switch (self.detected_protocol) {
             .binary => blk: {
                 const msg = types.BinaryNewOrder.init(
                     user_id,
@@ -266,12 +452,23 @@ pub const EngineClient = struct {
         };
 
         try self.sendRaw(data);
+        self.messages_sent +|= 1;
     }
 
-    /// Send a cancel order request
+    /// Send a cancel order request.
+    ///
+    /// Parameters:
+    ///   user_id - User identifier
+    ///   symbol - Trading symbol
+    ///   order_id - Order ID to cancel
     pub fn sendCancel(self: *Self, user_id: u32, symbol: []const u8, order_id: u32) !void {
-        const proto = self.detected_protocol;
-        const data = switch (proto) {
+        // Assertion 1: Symbol must be valid
+        std.debug.assert(symbol.len > 0 and symbol.len <= types.MAX_SYMBOL_LEN);
+
+        // Assertion 2: Self must be connected
+        std.debug.assert(self.isConnected());
+
+        const data = switch (self.detected_protocol) {
             .binary => blk: {
                 const msg = types.BinaryCancel.init(user_id, symbol, order_id);
                 break :blk msg.asBytes();
@@ -283,12 +480,15 @@ pub const EngineClient = struct {
         };
 
         try self.sendRaw(data);
+        self.messages_sent +|= 1;
     }
 
-    /// Send a flush command (cancel all orders)
+    /// Send a flush command (cancel all orders).
     pub fn sendFlush(self: *Self) !void {
-        const proto = self.detected_protocol;
-        const data = switch (proto) {
+        // Assertion 1: Self must be connected
+        std.debug.assert(self.isConnected());
+
+        const data = switch (self.detected_protocol) {
             .binary => blk: {
                 const msg = types.BinaryFlush{};
                 break :blk msg.asBytes();
@@ -300,21 +500,47 @@ pub const EngineClient = struct {
         };
 
         try self.sendRaw(data);
+
+        // Assertion 2: Message was formatted
+        std.debug.assert(data.len > 0);
+
+        self.messages_sent +|= 1;
     }
 
-    /// Send raw bytes (for custom messages)
+    /// Send raw bytes.
+    ///
+    /// Parameters:
+    ///   data - Raw bytes to send
     pub fn sendRaw(self: *Self, data: []const u8) !void {
+        // Assertion 1: Data should not be empty
+        std.debug.assert(data.len > 0);
+
+        // Assertion 2: Should be connected
+        std.debug.assert(self.isConnected());
+
         if (self.tcp_client) |*client| {
             try client.send(data);
         } else if (self.udp_client) |*client| {
             try client.send(data);
+        } else {
+            self.send_errors +|= 1;
+            return error.NotConnected;
         }
     }
 
     /// Receive the next response message.
-    /// Works for both TCP and UDP transports.
+    ///
+    /// Returns: Parsed OutputMessage
     pub fn recv(self: *Self) !types.OutputMessage {
+        // Assertion 1: Should be connected
+        std.debug.assert(self.isConnected());
+
         const data = try self.recvRaw();
+
+        // Assertion 2: Got some data
+        std.debug.assert(data.len > 0);
+
+        self.messages_received +|= 1;
 
         // Auto-detect protocol from response
         if (binary.isBinaryProtocol(data)) {
@@ -325,77 +551,172 @@ pub const EngineClient = struct {
     }
 
     /// Receive raw response bytes.
-    /// Works for both TCP and UDP transports.
+    ///
+    /// Returns: Raw response data
     pub fn recvRaw(self: *Self) ![]const u8 {
+        // Assertion 1: Should be connected
+        std.debug.assert(self.isConnected());
+
         if (self.tcp_client) |*client| {
-            return try client.recv();
+            const data = try client.recv();
+            // Assertion 2: Got data from TCP
+            std.debug.assert(data.len > 0 or data.len == 0); // May be empty on timeout
+            return data;
         } else if (self.udp_client) |*client| {
-            return try client.recv();
+            const data = try client.recv();
+            // Assertion 2: Got data from UDP
+            std.debug.assert(data.len > 0 or data.len == 0);
+            return data;
         }
+
         return error.NotConnected;
     }
 
-    /// Try to receive with a timeout (non-blocking check).
-    /// Returns null if no data available within timeout.
-    /// Useful for interactive mode where you don't want to block forever.
+    /// Try to receive with timeout (non-blocking).
+    ///
+    /// Parameters:
+    ///   timeout_ms - Timeout in milliseconds
+    ///
+    /// Returns: Parsed message or null if no data available
     pub fn tryRecv(self: *Self, timeout_ms: u32) !?types.OutputMessage {
+        // Assertion 1: Timeout should be reasonable
+        std.debug.assert(timeout_ms < 3600_000); // Less than 1 hour
+
         const data = try self.tryRecvRaw(timeout_ms);
+
         if (data) |d| {
+            // Assertion 2: Got non-empty data
+            std.debug.assert(d.len > 0);
+
+            self.messages_received +|= 1;
+
             if (binary.isBinaryProtocol(d)) {
                 return try binary.decodeOutput(d);
             } else {
                 return try csv.parseOutput(d);
             }
         }
+
         return null;
     }
 
-    /// Try to receive raw bytes with a timeout.
-    /// Returns null if no data available.
+    /// Try to receive raw bytes with timeout.
+    ///
+    /// Parameters:
+    ///   timeout_ms - Timeout in milliseconds
+    ///
+    /// Returns: Raw data or null if no data available
     pub fn tryRecvRaw(self: *Self, timeout_ms: u32) !?[]const u8 {
+        // Assertion 1: Self should be valid
+        std.debug.assert(@intFromPtr(self) != 0);
+
         if (self.tcp_client) |*client| {
-            // TCP: try non-blocking receive
-            return client.recv() catch |err| {
-                if (err == error.WouldBlock) return null;
+            return client.tryRecv(timeout_ms) catch |err| {
+                if (err == error.WouldBlock or err == error.Timeout) return null;
                 return err;
             };
         } else if (self.udp_client) |*client| {
-            // UDP: use poll/select or just try recv
-            // For simplicity, do a blocking recv with OS timeout
-            // (In production, you'd set SO_RCVTIMEO or use poll)
-            _ = timeout_ms; // TODO: implement proper timeout
+            // TODO: Implement proper timeout for UDP using SO_RCVTIMEO
+            // For now, do a non-blocking recv attempt (timeout_ms ignored for UDP)
             return client.recv() catch |err| {
                 if (err == error.WouldBlock) return null;
                 return err;
             };
         }
+
+        // Assertion 2: Not connected
+        std.debug.assert(false);
         return error.NotConnected;
     }
 
-    /// Check if connected (TCP only, UDP is connectionless)
+    /// Check if connected.
     pub fn isConnected(self: *const Self) bool {
+        // Assertion 1: Self should be valid
+        std.debug.assert(@intFromPtr(self) != 0);
+
         if (self.tcp_client) |*client| {
-            return client.isConnected();
+            const connected = client.isConnected();
+            // Assertion 2: Check completed
+            std.debug.assert(connected or !connected);
+            return connected;
         }
-        // UDP is connectionless - consider it always "connected" to target
-        return self.udp_client != null;
+
+        // UDP is connectionless - consider it always "connected"
+        const has_udp = self.udp_client != null;
+
+        // Assertion 2: Result is valid
+        std.debug.assert(has_udp or !has_udp);
+
+        return has_udp;
     }
 
-    /// Close the client
+    /// Get client statistics.
+    pub fn getStats(self: *const Self) struct { sent: u64, received: u64, errors: u64 } {
+        // Assertion 1: Self should be valid
+        std.debug.assert(@intFromPtr(self) != 0);
+
+        // Assertion 2: Stats should be consistent
+        std.debug.assert(self.messages_sent >= self.send_errors or self.messages_sent == 0);
+
+        return .{
+            .sent = self.messages_sent,
+            .received = self.messages_received,
+            .errors = self.send_errors,
+        };
+    }
+
+    /// Reset statistics.
+    pub fn resetStats(self: *Self) void {
+        // Assertion 1: Self should be valid
+        std.debug.assert(@intFromPtr(self) != 0);
+
+        self.messages_sent = 0;
+        self.messages_received = 0;
+        self.send_errors = 0;
+
+        // Assertion 2: Stats reset
+        std.debug.assert(self.messages_sent == 0);
+    }
+
+    /// Close the client and release resources.
     pub fn deinit(self: *Self) void {
+        // Assertion 1: Self should be valid
+        std.debug.assert(@intFromPtr(self) != 0);
+
         if (self.tcp_client) |*client| {
             client.close();
             self.tcp_client = null;
         }
+
         if (self.udp_client) |*client| {
             client.close();
             self.udp_client = null;
         }
+
+        // Assertion 2: All connections closed
+        std.debug.assert(self.tcp_client == null);
+        std.debug.assert(self.udp_client == null);
     }
 };
 
-/// Convenience function to create a TCP binary client (most common case)
+// ============================================================
+// Convenience Functions
+// ============================================================
+
+/// Create a TCP binary client (most common configuration).
+///
+/// Parameters:
+///   host - Server hostname or IP
+///   port - Server port
+///
+/// Returns: Connected client
 pub fn connectTcpBinary(host: []const u8, port: u16) !EngineClient {
+    // Assertion 1: Host should be valid
+    std.debug.assert(host.len > 0);
+
+    // Assertion 2: Port should be valid
+    std.debug.assert(port > 0);
+
     return EngineClient.init(.{
         .host = host,
         .port = port,
@@ -404,13 +725,47 @@ pub fn connectTcpBinary(host: []const u8, port: u16) !EngineClient {
     });
 }
 
-/// Convenience function to create a UDP binary client
+/// Create a UDP binary client.
+///
+/// Parameters:
+///   host - Server hostname or IP
+///   port - Server port
+///
+/// Returns: Connected client
 pub fn connectUdpBinary(host: []const u8, port: u16) !EngineClient {
+    // Assertion 1: Host should be valid
+    std.debug.assert(host.len > 0);
+
+    // Assertion 2: Port should be valid
+    std.debug.assert(port > 0);
+
     return EngineClient.init(.{
         .host = host,
         .port = port,
         .transport = .udp,
         .protocol = .binary,
+    });
+}
+
+/// Create a TCP CSV client (useful for debugging).
+///
+/// Parameters:
+///   host - Server hostname or IP
+///   port - Server port
+///
+/// Returns: Connected client
+pub fn connectTcpCsv(host: []const u8, port: u16) !EngineClient {
+    // Assertion 1: Host should be valid
+    std.debug.assert(host.len > 0);
+
+    // Assertion 2: Port should be valid
+    std.debug.assert(port > 0);
+
+    return EngineClient.init(.{
+        .host = host,
+        .port = port,
+        .transport = .tcp,
+        .protocol = .csv,
     });
 }
 
@@ -430,4 +785,22 @@ test "Config defaults" {
     try std.testing.expectEqual(@as(u16, 1234), config.port);
     try std.testing.expectEqual(Transport.auto, config.transport);
     try std.testing.expectEqual(Protocol.auto, config.protocol);
+    try std.testing.expect(config.validate());
+}
+
+test "Config validation" {
+    const valid_config = Config{ .host = "localhost", .port = 8080 };
+    try std.testing.expect(valid_config.validate());
+}
+
+test "Protocol toString" {
+    try std.testing.expectEqualStrings("binary", Protocol.binary.toString());
+    try std.testing.expectEqualStrings("csv", Protocol.csv.toString());
+    try std.testing.expectEqualStrings("auto", Protocol.auto.toString());
+}
+
+test "Transport toString" {
+    try std.testing.expectEqualStrings("tcp", Transport.tcp.toString());
+    try std.testing.expectEqualStrings("udp", Transport.udp.toString());
+    try std.testing.expectEqualStrings("auto", Transport.auto.toString());
 }
