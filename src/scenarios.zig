@@ -268,16 +268,16 @@ fn runMatchingStress(client: *EngineClient, stderr: anytype, trades: u64) !void 
 
     // BALANCED MODE - slower but reliable
     // Key: We must drain faster than we send to avoid overwhelming server
-    const pairs_per_batch: u64 = if (trades >= 100_000_000) 100
-        else if (trades >= 1_000_000) 100
-        else if (trades >= 100_000) 100
+    const pairs_per_batch: u64 = if (trades >= 100_000_000) 850
+        else if (trades >= 1_000_000) 500
+        else if (trades >= 100_000) 350
         else if (trades >= 10_000) 50
         else 50;
 
-    const delay_between_batches_ns: u64 = if (trades >= 100_000_000) 50 * std.time.ns_per_ms
-        else if (trades >= 1_000_000) 50 * std.time.ns_per_ms
-        else if (trades >= 100_000) 30 * std.time.ns_per_ms
-        else if (trades >= 10_000) 20 * std.time.ns_per_ms
+    const delay_between_batches_ns: u64 = if (trades >= 100_000_000) 100 * std.time.ns_per_ms
+        else if (trades >= 1_000_000) 125 * std.time.ns_per_ms
+        else if (trades >= 100_000) 70 * std.time.ns_per_ms
+        else if (trades >= 10_000) 35 * std.time.ns_per_ms
         else 10 * std.time.ns_per_ms;
 
     const progress_pct: u64 = if (trades >= 1_000_000) 5 else 10;
@@ -369,7 +369,7 @@ fn runMatchingStress(client: *EngineClient, stderr: anytype, trades: u64) !void 
         else if (trades >= 500_000) 300_000     // 5 min
         else if (trades >= 250_000) 180_000     // 3 min
         else if (trades >= 100_000) 120_000     // 2 min
-        else 60_000;                            // 1 min
+        else 75_000;                            // 1 min
 
     const final_stats = try drainResponses(client, drain_timeout_ms);
     
@@ -630,15 +630,15 @@ fn drainResponses(client: *EngineClient, timeout_ms: u32) !ResponseStats {
     var stats = ResponseStats{};
     
     // Give server time to start sending responses
-    std.time.sleep(100 * std.time.ns_per_ms);
+    std.time.sleep(200 * std.time.ns_per_ms);
 
     const start_time = timestamp.now();
     const timeout_ns: u64 = @as(u64, timeout_ms) * std.time.ns_per_ms;
     var consecutive_empty: u32 = 0;
     
     // Use longer poll timeout and higher empty threshold for reliability
-    const poll_timeout_ms: i32 = 50; // 50ms poll for better batching
-    const max_consecutive_empty: u32 = 100; // 100 * 50ms = 5 seconds of idle
+    const poll_timeout_ms: i32 = 75; // 50ms poll for better batching
+    const max_consecutive_empty: u32 = 200; // 100 * 50ms = 5 seconds of idle
 
     while (timestamp.now() - start_time < timeout_ns) {
         // Use blocking recv with timeout for more reliable draining
