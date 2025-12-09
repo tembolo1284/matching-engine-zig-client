@@ -476,8 +476,9 @@ pub const OutputMessage = struct {
     // Reject reason code (4 bytes)
     reject_reason: u32 = 0,
 
-    // Padding to reach exactly 64 bytes
-    _padding: [12]u8 = undefined,
+    // Padding to reach exactly 64 bytes (1 cache line)
+    // Layout: 1 + 8 + 1 + 2 + (9 * 4) = 48 bytes, need 16 more
+    _padding: [16]u8 = undefined,
 
     // Compile-time verification
     comptime {

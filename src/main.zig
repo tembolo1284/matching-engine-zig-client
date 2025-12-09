@@ -509,6 +509,14 @@ fn printResponse(msg: OutputMessage, stderr: anytype) !void {
                 msg.quantity,
             });
         },
+        .reject => {
+            try stderr.print("[RECV] R, {s}, {d}, {d}, {d}\n", .{
+                symbol,
+                msg.user_id,
+                msg.order_id,
+                msg.reject_reason,
+            });
+        },
         .top_of_book => {
             const side_char: u8 = if (msg.side) |s| @intFromEnum(s) else '-';
             if (msg.price == 0 and msg.quantity == 0) {
