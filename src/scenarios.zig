@@ -377,6 +377,10 @@ fn runMatchingStress(client: *EngineClient, stderr: anytype, trades: u64) !void 
 
     try stderr.print("\nReceived during send: {d} messages\n", .{running_stats.total()});
 
+    // Let TCP buffers fully flush before counting
+    try stderr.print("Waiting for TCP buffers to flush...\n", .{});
+    std.time.sleep(3000 * std.time.ns_per_ms);
+
     const expected_acks = orders_sent;
     const expected_trades = pairs_sent;
     const expected_total = expected_acks + expected_trades + expected_trades * 2;
@@ -407,7 +411,8 @@ fn runMatchingStress(client: *EngineClient, stderr: anytype, trades: u64) !void 
 
     try stderr.print("\n[FLUSH] Cleaning up server state\n", .{});
     try client.sendFlush();
-    std.time.sleep(200 * std.time.ns_per_ms);
+    // Give TCP buffers time to fully drain before disconnect
+    std.time.sleep(2000 * std.time.ns_per_ms);
 }
 
 // ============================================================
@@ -533,6 +538,10 @@ fn runDualProcessorStress(client: *EngineClient, stderr: anytype, trades: u64) !
 
     try stderr.print("\nReceived during send: {d} messages\n", .{running_stats.total()});
 
+    // Let TCP buffers fully flush before counting
+    try stderr.print("Waiting for TCP buffers to flush...\n", .{});
+    std.time.sleep(3000 * std.time.ns_per_ms);
+
     const expected_acks = orders_sent;
     const expected_trades = pairs_sent;
     const expected_total = expected_acks + expected_trades + expected_trades * 2;
@@ -560,7 +569,8 @@ fn runDualProcessorStress(client: *EngineClient, stderr: anytype, trades: u64) !
 
     try stderr.print("\n[FLUSH] Cleaning up server state\n", .{});
     try client.sendFlush();
-    std.time.sleep(200 * std.time.ns_per_ms);
+    // Give TCP buffers time to fully drain before disconnect
+    std.time.sleep(2000 * std.time.ns_per_ms);
 }
 
 // ============================================================
@@ -660,7 +670,7 @@ fn drainResponses(client: *EngineClient, timeout_ms: u32) !ResponseStats {
     
     // Use longer poll timeout and higher empty threshold for reliability
     const poll_timeout_ms: i32 = 100; // 100ms poll for better batching
-    const max_consecutive_empty: u32 = 500; // 500 * 100ms = 50 seconds of idle before giving up
+    const max_consecutive_empty: u32 = 1000; // 1000 * 100ms = 100 seconds of idle before giving up
 
     while (timestamp.now() - start_time < timeout_ns) {
         // Use blocking recv with timeout for more reliable draining
