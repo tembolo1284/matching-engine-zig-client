@@ -157,9 +157,9 @@ pub fn copySymbol(dest: *[MAX_SYMBOL_LEN]u8, src: []const u8) void {
 // These structs are `extern` with `align(1)` on multi-byte fields to match
 // the C server's packed wire format exactly. No Zig-inserted padding.
 
-/// Binary new order message - 30 bytes on wire.
+/// Binary new order message - 27 bytes on wire.
 ///
-/// # Wire Layout
+/// # Wire Layout (matches server's binary_codec.zig exactly)
 /// ```
 /// Offset  Size  Field          Encoding
 /// ------  ----  -----          --------
@@ -171,9 +171,8 @@ pub fn copySymbol(dest: *[MAX_SYMBOL_LEN]u8, src: []const u8) void {
 /// 18      4     quantity       big-endian u32
 /// 22      1     side           'B' or 'S'
 /// 23      4     user_order_id  big-endian u32
-/// 27      3     padding        0x00
 /// ------
-/// Total: 30 bytes
+/// Total: 27 bytes
 /// ```
 pub const BinaryNewOrder = extern struct {
     magic: u8 = MAGIC_BYTE,
@@ -184,12 +183,12 @@ pub const BinaryNewOrder = extern struct {
     quantity: u32 align(1),
     side: u8,
     user_order_id: u32 align(1),
-    _pad: [3]u8 = .{ 0, 0, 0 },
+    // NO PADDING - must match server's 27-byte wire format exactly
 
     // Compile-time size verification (Power of Ten Rule 10)
     comptime {
-        if (@sizeOf(BinaryNewOrder) != 30) {
-            @compileError("BinaryNewOrder must be exactly 30 bytes");
+        if (@sizeOf(BinaryNewOrder) != 27) {
+            @compileError("BinaryNewOrder must be exactly 27 bytes to match server");
         }
     }
 
@@ -220,7 +219,7 @@ pub const BinaryNewOrder = extern struct {
     }
 
     /// Get raw bytes for sending over network.
-    pub fn asBytes(self: *const BinaryNewOrder) *const [30]u8 {
+    pub fn asBytes(self: *const BinaryNewOrder) *const [27]u8 {
         return @ptrCast(self);
     }
 
@@ -230,9 +229,9 @@ pub const BinaryNewOrder = extern struct {
     }
 };
 
-/// Binary cancel order message - 19 bytes on wire.
+/// Binary cancel order message - 18 bytes on wire.
 ///
-/// # Wire Layout
+/// # Wire Layout (matches server's binary_codec.zig exactly)
 /// ```
 /// Offset  Size  Field          Encoding
 /// ------  ----  -----          --------
@@ -241,9 +240,8 @@ pub const BinaryNewOrder = extern struct {
 /// 2       4     user_id        big-endian u32
 /// 6       8     symbol         null-padded ASCII
 /// 14      4     user_order_id  big-endian u32
-/// 18      1     padding        0x00
 /// ------
-/// Total: 19 bytes
+/// Total: 18 bytes
 /// ```
 pub const BinaryCancel = extern struct {
     magic: u8 = MAGIC_BYTE,
@@ -251,11 +249,11 @@ pub const BinaryCancel = extern struct {
     user_id: u32 align(1),
     symbol: [MAX_SYMBOL_LEN]u8,
     user_order_id: u32 align(1),
-    _pad: u8 = 0,
+    // NO PADDING - must match server's 18-byte wire format exactly
 
     comptime {
-        if (@sizeOf(BinaryCancel) != 19) {
-            @compileError("BinaryCancel must be exactly 19 bytes");
+        if (@sizeOf(BinaryCancel) != 18) {
+            @compileError("BinaryCancel must be exactly 18 bytes to match server");
         }
     }
 
@@ -272,7 +270,7 @@ pub const BinaryCancel = extern struct {
         };
     }
 
-    pub fn asBytes(self: *const BinaryCancel) *const [19]u8 {
+    pub fn asBytes(self: *const BinaryCancel) *const [18]u8 {
         return @ptrCast(self);
     }
 
@@ -305,18 +303,17 @@ pub const BinaryFlush = extern struct {
 // Binary Protocol Output Messages
 // =============================================================================
 
-/// Binary acknowledgement - 19 bytes on wire.
+/// Binary acknowledgement - 18 bytes on wire.
 pub const BinaryAck = extern struct {
     magic: u8,
     msg_type: u8,
     symbol: [MAX_SYMBOL_LEN]u8,
     user_id: u32 align(1),
     user_order_id: u32 align(1),
-    _pad: u8 = 0,
 
     comptime {
-        if (@sizeOf(BinaryAck) != 19) {
-            @compileError("BinaryAck must be exactly 19 bytes");
+        if (@sizeOf(BinaryAck) != 18) {
+            @compileError("BinaryAck must be exactly 18 bytes");
         }
     }
 
@@ -587,14 +584,14 @@ test "BinaryNewOrder layout and encoding" {
     try std.testing.expectEqual(@as(u8, MAGIC_BYTE), bytes[0]);
     try std.testing.expectEqual(@as(u8, 'N'), bytes[1]);
 
-    // Verify size
-    try std.testing.expectEqual(@as(usize, 30), bytes.len);
+    // Verify size matches server's wire format
+    try std.testing.expectEqual(@as(usize, 27), bytes.len);
 
-    // Verify symbol null-padded
+    // Verify symbol null-padded (starts at offset 6)
     try std.testing.expectEqualStrings("IBM", bytes[6..9]);
     try std.testing.expectEqual(@as(u8, 0), bytes[9]);
 
-    // Verify side
+    // Verify side (at offset 22)
     try std.testing.expectEqual(@as(u8, 'B'), bytes[22]);
 }
 
@@ -604,9 +601,11 @@ test "BinaryCancel layout" {
 
     try std.testing.expectEqual(@as(u8, MAGIC_BYTE), bytes[0]);
     try std.testing.expectEqual(@as(u8, 'C'), bytes[1]);
-    try std.testing.expectEqual(@as(usize, 19), bytes.len);
+    
+    // Verify size matches server's wire format
+    try std.testing.expectEqual(@as(usize, 18), bytes.len);
 
-    // Verify symbol
+    // Verify symbol (starts at offset 6)
     try std.testing.expectEqualStrings("AAPL", bytes[6..10]);
 }
 

@@ -17,6 +17,7 @@
 //! - Auto-detection sends probe orders that are immediately cancelled
 //! - Pre-allocated send buffer avoids hot-path allocations
 //! - Protocol detection has bounded retry logic
+//! - Binary and CSV probes use DIFFERENT order IDs to prevent duplicate key errors
 
 const std = @import("std");
 const types = @import("../protocol/types.zig");
@@ -35,8 +36,13 @@ const PROTOCOL_DETECT_TIMEOUT_MS: u32 = 200;
 /// Maximum drain iterations during protocol detection
 const MAX_DRAIN_ITERATIONS: u32 = 20;
 
-/// Probe order ID (high value unlikely to conflict)
-const PROBE_ORDER_ID: u32 = 999999999;
+/// Probe order ID for BINARY protocol detection (high value unlikely to conflict)
+/// IMPORTANT: Must be different from CSV probe to avoid duplicate key errors on server!
+const PROBE_ORDER_ID_BINARY: u32 = 999999998;
+
+/// Probe order ID for CSV protocol detection
+/// IMPORTANT: Must be different from binary probe to avoid duplicate key errors on server!
+const PROBE_ORDER_ID_CSV: u32 = 999999999;
 
 /// Probe symbol (starts with Z for processor 1)
 const PROBE_SYMBOL = "ZZPROBE";
@@ -275,6 +281,7 @@ pub const EngineClient = struct {
     }
 
     /// Send binary probe and check response.
+    /// Uses PROBE_ORDER_ID_BINARY (different from CSV probe).
     fn probeBinary(self: *Self) Protocol {
         // Assertion 1: TCP client must exist
         std.debug.assert(self.tcp_client != null);
@@ -285,7 +292,7 @@ pub const EngineClient = struct {
             1,
             1,
             .buy,
-            PROBE_ORDER_ID,
+            PROBE_ORDER_ID_BINARY, // Use binary-specific order ID
         );
 
         self.tcp_client.?.send(probe_order.asBytes()) catch {
@@ -304,17 +311,19 @@ pub const EngineClient = struct {
 
         // Check if response looks like binary
         if (response.len > 0 and binary.isBinaryProtocol(response)) {
-            // Got binary response, clean up with cancel
-            const cancel = types.BinaryCancel.init(1, PROBE_SYMBOL, PROBE_ORDER_ID);
+            // Got binary response, clean up with cancel using SAME order ID
+            const cancel = types.BinaryCancel.init(1, PROBE_SYMBOL, PROBE_ORDER_ID_BINARY);
             self.tcp_client.?.send(cancel.asBytes()) catch {};
             self.drainResponses();
             return .binary;
         }
 
-        // Response was CSV or empty
+        // Response was CSV or empty - clean up binary probe with cancel
+        // Note: Server may have rejected or the order may still be active
         if (response.len > 0) {
-            const cancel_csv = "C, 1, ZZPROBE, 999999999\n";
-            self.tcp_client.?.send(cancel_csv) catch {};
+            // Try to cancel with binary format first (in case server accepted binary order)
+            const cancel_binary = types.BinaryCancel.init(1, PROBE_SYMBOL, PROBE_ORDER_ID_BINARY);
+            self.tcp_client.?.send(cancel_binary.asBytes()) catch {};
             self.drainResponses();
         }
 
@@ -322,11 +331,13 @@ pub const EngineClient = struct {
     }
 
     /// Send CSV probe and check response.
+    /// Uses PROBE_ORDER_ID_CSV (different from binary probe).
     fn probeCsv(self: *Self) Protocol {
         // Assertion 1: TCP client must exist
         std.debug.assert(self.tcp_client != null);
 
-        const csv_order = "N, 1, ZZPROBE, 1, 1, B, 999999999\n";
+        // Use CSV-specific order ID to avoid duplicate key with binary probe
+        const csv_order = "N, 1, ZZPROBE, 1, 1, B, 999999999\n"; // PROBE_ORDER_ID_CSV
         self.tcp_client.?.send(csv_order) catch {
             // Assertion 2: Send failed
             std.debug.assert(true);
@@ -341,15 +352,16 @@ pub const EngineClient = struct {
 
         // Check if server responded with binary to our CSV
         if (response.len > 0 and binary.isBinaryProtocol(response)) {
-            const cancel = types.BinaryCancel.init(1, PROBE_SYMBOL, PROBE_ORDER_ID);
+            // Server is binary-only, cancel with binary format
+            const cancel = types.BinaryCancel.init(1, PROBE_SYMBOL, PROBE_ORDER_ID_CSV);
             self.tcp_client.?.send(cancel.asBytes()) catch {};
             self.drainResponses();
             return .binary;
         }
 
-        // Got CSV response, clean up
+        // Got CSV response (or no response), clean up with CSV cancel
         if (response.len > 0) {
-            const cancel_csv = "C, 1, ZZPROBE, 999999999\n";
+            const cancel_csv = "C, 1, ZZPROBE, 999999999\n"; // PROBE_ORDER_ID_CSV
             self.tcp_client.?.send(cancel_csv) catch {};
             self.drainResponses();
         }
@@ -803,4 +815,10 @@ test "Transport toString" {
     try std.testing.expectEqualStrings("tcp", Transport.tcp.toString());
     try std.testing.expectEqualStrings("udp", Transport.udp.toString());
     try std.testing.expectEqualStrings("auto", Transport.auto.toString());
+}
+
+test "Probe order IDs are different" {
+    // Critical test: ensure binary and CSV probes use different order IDs
+    // to prevent duplicate key errors on server
+    try std.testing.expect(PROBE_ORDER_ID_BINARY != PROBE_ORDER_ID_CSV);
 }
