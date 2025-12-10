@@ -292,6 +292,10 @@ pub const EngineClient = struct {
     /// Send binary probe and check response.
     /// Uses PROBE_ORDER_ID_BINARY (different from CSV probe).
     /// NOTE: TcpClient handles framing internally - do NOT add framing here.
+    /// 
+    /// Detection logic: If server responds to our binary message with ANY valid
+    /// response (binary ACK or CSV ACK), it means the server understood binary.
+    /// We use binary for all future communication.
     fn probeBinary(self: *Self) Protocol {
         // Assertion 1: TCP client must exist
         std.debug.assert(self.tcp_client != null);
@@ -327,26 +331,30 @@ pub const EngineClient = struct {
         }
         std.debug.print("\n", .{});
 
-        // Check if response looks like binary (TcpClient strips frame header)
-        if (response.len > 0 and binary.isBinaryProtocol(response)) {
-            std.debug.print("DEBUG probeBinary: BINARY detected!\n", .{});
-            // Got binary response, clean up with cancel using SAME order ID
-            const cancel = types.BinaryCancel.init(1, PROBE_SYMBOL, PROBE_ORDER_ID_BINARY);
-            self.tcp_client.?.send(cancel.asBytes()) catch {};
-            self.drainResponses();
-            return .binary;
-        }
-
-        // Response was CSV or empty - clean up binary probe with cancel
-        std.debug.print("DEBUG probeBinary: NOT binary (first byte 0x{X:0>2}, expected 0x4D)\n", .{
-            if (response.len > 0) response[0] else 0,
-        });
+        // Check if we got a valid response (server understood our binary message)
         if (response.len > 0) {
-            const cancel_binary = types.BinaryCancel.init(1, PROBE_SYMBOL, PROBE_ORDER_ID_BINARY);
-            self.tcp_client.?.send(cancel_binary.asBytes()) catch {};
-            self.drainResponses();
+            // Check for binary ACK (starts with magic byte 0x4D)
+            const is_binary_response = binary.isBinaryProtocol(response);
+            
+            // Check for CSV ACK (starts with 'A' for ACK)
+            const is_csv_ack = response[0] == 'A';
+            
+            if (is_binary_response or is_csv_ack) {
+                std.debug.print("DEBUG probeBinary: Server understood binary! (response_type={})\n", .{
+                    if (is_binary_response) @as(u8, 'B') else @as(u8, 'C'),
+                });
+                
+                // Server understood our binary message - use binary protocol
+                // Clean up with cancel using SAME order ID
+                const cancel = types.BinaryCancel.init(1, PROBE_SYMBOL, PROBE_ORDER_ID_BINARY);
+                self.tcp_client.?.send(cancel.asBytes()) catch {};
+                self.drainResponses();
+                return .binary;
+            }
         }
 
+        // No valid response - server didn't understand binary
+        std.debug.print("DEBUG probeBinary: Server did not understand binary\n", .{});
         return .csv;
     }
 

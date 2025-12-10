@@ -386,9 +386,9 @@ pub const BinaryTopOfBook = extern struct {
     msg_type: u8,
     symbol: [MAX_SYMBOL_LEN]u8,
     side: u8,
-    _pad: u8 = 0,
     price: u32 align(1),
     quantity: u32 align(1),
+    _pad: u8 = 0,
 
     comptime {
         if (@sizeOf(BinaryTopOfBook) != 20) {

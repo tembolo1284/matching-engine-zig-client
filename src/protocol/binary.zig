@@ -419,7 +419,7 @@ test "decode binary top of book" {
     @memset(data[5..10], 0);
 
     data[10] = 'B'; // side
-    data[11] = 0; // padding
+    data[19] = 0; // padding
 
     std.mem.writeInt(u32, data[12..16], 10000, .big);
     std.mem.writeInt(u32, data[16..20], 100, .big);
