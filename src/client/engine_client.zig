@@ -221,7 +221,7 @@ pub const EngineClient = struct {
                 self.detected_transport = .tcp;
             },
             .udp => {
-                self.udp_client = try udp.UdpClient.init(
+                self.udp_client = try udp.UdpClient.initWithTimeout(
                     self.config.host,
                     self.config.port,
                     self.config.udp_recv_timeout_ms,
@@ -254,7 +254,7 @@ pub const EngineClient = struct {
         }
 
         // Fall back to UDP
-        self.udp_client = try udp.UdpClient.init(
+        self.udp_client = try udp.UdpClient.initWithTimeout(
             self.config.host,
             self.config.port,
             self.config.udp_recv_timeout_ms,
@@ -307,8 +307,7 @@ pub const EngineClient = struct {
 
         // TcpClient handles framing internally - just send raw payload
         self.tcp_client.?.send(probe_order.asBytes()) catch {
-            // Assertion 2: Send failed, return CSV as fallback
-            std.debug.assert(true);
+            std.debug.print("DEBUG probeBinary: send failed\n", .{});
             return .csv;
         };
 
@@ -316,12 +315,21 @@ pub const EngineClient = struct {
         std.time.sleep(PROTOCOL_DETECT_TIMEOUT_MS * std.time.ns_per_ms);
 
         // Try to receive response
-        const response = self.tcp_client.?.recv() catch {
+        const response = self.tcp_client.?.recv() catch |err| {
+            std.debug.print("DEBUG probeBinary: recv failed: {}\n", .{err});
             return .csv;
         };
 
+        // Debug: show what we received
+        std.debug.print("DEBUG probeBinary: got {} bytes: ", .{response.len});
+        for (response[0..@min(response.len, 10)]) |b| {
+            std.debug.print("{X:0>2} ", .{b});
+        }
+        std.debug.print("\n", .{});
+
         // Check if response looks like binary (TcpClient strips frame header)
         if (response.len > 0 and binary.isBinaryProtocol(response)) {
+            std.debug.print("DEBUG probeBinary: BINARY detected!\n", .{});
             // Got binary response, clean up with cancel using SAME order ID
             const cancel = types.BinaryCancel.init(1, PROBE_SYMBOL, PROBE_ORDER_ID_BINARY);
             self.tcp_client.?.send(cancel.asBytes()) catch {};
@@ -330,6 +338,9 @@ pub const EngineClient = struct {
         }
 
         // Response was CSV or empty - clean up binary probe with cancel
+        std.debug.print("DEBUG probeBinary: NOT binary (first byte 0x{X:0>2}, expected 0x4D)\n", .{
+            if (response.len > 0) response[0] else 0,
+        });
         if (response.len > 0) {
             const cancel_binary = types.BinaryCancel.init(1, PROBE_SYMBOL, PROBE_ORDER_ID_BINARY);
             self.tcp_client.?.send(cancel_binary.asBytes()) catch {};
