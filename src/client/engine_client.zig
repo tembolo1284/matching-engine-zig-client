@@ -18,6 +18,7 @@
 //! - Pre-allocated send buffer avoids hot-path allocations
 //! - Protocol detection has bounded retry logic
 //! - Binary and CSV probes use DIFFERENT order IDs to prevent duplicate key errors
+//! - TcpClient handles length-prefix framing internally - do NOT add framing here
 
 const std = @import("std");
 const types = @import("../protocol/types.zig");
@@ -110,10 +111,6 @@ pub const Config = struct {
     /// Timeout for UDP receive in milliseconds (0 = blocking)
     udp_recv_timeout_ms: u32 = 1000,
 
-    /// Use length-prefixed framing for TCP (server default is true)
-    /// Format: [4-byte big-endian length][payload]
-    use_framing: bool = true,
-
     /// Validate configuration
     pub fn validate(self: Config) bool {
         // Assertion 1: Host should not be empty
@@ -156,9 +153,6 @@ pub const EngineClient = struct {
 
     /// Pre-allocated send buffer for CSV formatting
     send_buf: [types.MAX_CSV_LEN]u8 = undefined,
-
-    /// Pre-allocated buffer for framed messages (4-byte header + payload)
-    frame_buf: [4 + types.MAX_CSV_LEN]u8 = undefined,
 
     /// Detected/configured transport
     detected_transport: Transport = .tcp,
@@ -207,25 +201,48 @@ pub const EngineClient = struct {
             client.detected_protocol = config.protocol;
         }
 
-        // Update config with detected values
-        client.config.transport = client.detected_transport;
-        client.config.protocol = client.detected_protocol;
-
-        // Assertion 2: Client should be connected
+        // Assertion 2: Should be connected after init
         std.debug.assert(client.isConnected());
 
         return client;
     }
 
-    /// Detect and connect to the best available transport.
+    /// Connect to specified transport.
+    fn connectTransport(self: *Self, transport: Transport) !void {
+        // Assertion 1: Valid transport
+        std.debug.assert(transport != .auto);
+
+        switch (transport) {
+            .tcp => {
+                self.tcp_client = try tcp.TcpClient.connect(
+                    self.config.host,
+                    self.config.port,
+                );
+                self.detected_transport = .tcp;
+            },
+            .udp => {
+                self.udp_client = try udp.UdpClient.init(
+                    self.config.host,
+                    self.config.port,
+                    self.config.udp_recv_timeout_ms,
+                );
+                self.detected_transport = .udp;
+            },
+            .auto => unreachable,
+        }
+
+        // Assertion 2: Connection established
+        std.debug.assert(self.isConnected());
+    }
+
+    /// Auto-detect transport (try TCP first, fall back to UDP).
     fn detectTransport(self: *Self) !Transport {
-        // Assertion 1: No existing connections
-        std.debug.assert(self.tcp_client == null);
-        std.debug.assert(self.udp_client == null);
+        // Assertion 1: No existing connection
+        std.debug.assert(self.tcp_client == null and self.udp_client == null);
 
         // Try TCP first (preferred for reliability)
-        if (tcp.TcpClient.connect(self.config.host, self.config.port)) |tcp_conn| {
-            self.tcp_client = tcp_conn;
+        if (tcp.TcpClient.connect(self.config.host, self.config.port)) |client| {
+            self.tcp_client = client;
             self.detected_transport = .tcp;
 
             // Assertion 2: TCP connected
@@ -233,36 +250,21 @@ pub const EngineClient = struct {
 
             return .tcp;
         } else |_| {
-            // TCP failed, try UDP (connectionless, always "succeeds")
-            self.udp_client = try udp.UdpClient.init(self.config.host, self.config.port);
-            self.detected_transport = .udp;
-
-            // Assertion 2: UDP initialized
-            std.debug.assert(self.udp_client != null);
-
-            return .udp;
-        }
-    }
-
-    /// Connect to specified transport.
-    fn connectTransport(self: *Self, transport: Transport) !void {
-        // Assertion 1: Transport should be concrete (not auto)
-        std.debug.assert(transport != .auto);
-
-        switch (transport) {
-            .tcp => {
-                self.tcp_client = try tcp.TcpClient.connect(self.config.host, self.config.port);
-                self.detected_transport = .tcp;
-            },
-            .udp => {
-                self.udp_client = try udp.UdpClient.init(self.config.host, self.config.port);
-                self.detected_transport = .udp;
-            },
-            .auto => unreachable,
+            // TCP failed, try UDP
         }
 
-        // Assertion 2: Connected to something
-        std.debug.assert(self.tcp_client != null or self.udp_client != null);
+        // Fall back to UDP
+        self.udp_client = try udp.UdpClient.init(
+            self.config.host,
+            self.config.port,
+            self.config.udp_recv_timeout_ms,
+        );
+        self.detected_transport = .udp;
+
+        // Assertion 2: UDP connected
+        std.debug.assert(self.udp_client != null);
+
+        return .udp;
     }
 
     /// Detect protocol by sending a probe order and examining response.
@@ -289,6 +291,7 @@ pub const EngineClient = struct {
 
     /// Send binary probe and check response.
     /// Uses PROBE_ORDER_ID_BINARY (different from CSV probe).
+    /// NOTE: TcpClient handles framing internally - do NOT add framing here.
     fn probeBinary(self: *Self) Protocol {
         // Assertion 1: TCP client must exist
         std.debug.assert(self.tcp_client != null);
@@ -299,24 +302,15 @@ pub const EngineClient = struct {
             1,
             1,
             .buy,
-            PROBE_ORDER_ID_BINARY, // Use binary-specific order ID
+            PROBE_ORDER_ID_BINARY,
         );
 
-        // Send with framing if configured
-        const data = probe_order.asBytes();
-        if (self.config.use_framing) {
-            const framed = self.frameMessage(data);
-            self.tcp_client.?.send(framed) catch {
-                // Assertion 2: Send failed, return CSV as fallback
-                std.debug.assert(true);
-                return .csv;
-            };
-        } else {
-            self.tcp_client.?.send(data) catch {
-                std.debug.assert(true);
-                return .csv;
-            };
-        }
+        // TcpClient handles framing internally - just send raw payload
+        self.tcp_client.?.send(probe_order.asBytes()) catch {
+            // Assertion 2: Send failed, return CSV as fallback
+            std.debug.assert(true);
+            return .csv;
+        };
 
         // Wait for response
         std.time.sleep(PROTOCOL_DETECT_TIMEOUT_MS * std.time.ns_per_ms);
@@ -326,39 +320,19 @@ pub const EngineClient = struct {
             return .csv;
         };
 
-        // Skip frame header if present (first 4 bytes are length)
-        const payload = if (self.config.use_framing and response.len > 4)
-            response[4..]
-        else
-            response;
-
-        // Check if response looks like binary
-        if (payload.len > 0 and binary.isBinaryProtocol(payload)) {
+        // Check if response looks like binary (TcpClient strips frame header)
+        if (response.len > 0 and binary.isBinaryProtocol(response)) {
             // Got binary response, clean up with cancel using SAME order ID
             const cancel = types.BinaryCancel.init(1, PROBE_SYMBOL, PROBE_ORDER_ID_BINARY);
-            const cancel_data = cancel.asBytes();
-            if (self.config.use_framing) {
-                const framed_cancel = self.frameMessage(cancel_data);
-                self.tcp_client.?.send(framed_cancel) catch {};
-            } else {
-                self.tcp_client.?.send(cancel_data) catch {};
-            }
+            self.tcp_client.?.send(cancel.asBytes()) catch {};
             self.drainResponses();
             return .binary;
         }
 
         // Response was CSV or empty - clean up binary probe with cancel
-        // Note: Server may have rejected or the order may still be active
         if (response.len > 0) {
-            // Try to cancel with binary format first (in case server accepted binary order)
             const cancel_binary = types.BinaryCancel.init(1, PROBE_SYMBOL, PROBE_ORDER_ID_BINARY);
-            const cancel_data = cancel_binary.asBytes();
-            if (self.config.use_framing) {
-                const framed_cancel = self.frameMessage(cancel_data);
-                self.tcp_client.?.send(framed_cancel) catch {};
-            } else {
-                self.tcp_client.?.send(cancel_data) catch {};
-            }
+            self.tcp_client.?.send(cancel_binary.asBytes()) catch {};
             self.drainResponses();
         }
 
@@ -367,27 +341,18 @@ pub const EngineClient = struct {
 
     /// Send CSV probe and check response.
     /// Uses PROBE_ORDER_ID_CSV (different from binary probe).
+    /// NOTE: TcpClient handles framing internally - do NOT add framing here.
     fn probeCsv(self: *Self) Protocol {
         // Assertion 1: TCP client must exist
         std.debug.assert(self.tcp_client != null);
 
         // Use CSV-specific order ID to avoid duplicate key with binary probe
-        const csv_order = "N, 1, ZZPROBE, 1, 1, B, 999999999\n"; // PROBE_ORDER_ID_CSV
-
-        // Send with framing if configured
-        if (self.config.use_framing) {
-            const framed = self.frameMessage(csv_order);
-            self.tcp_client.?.send(framed) catch {
-                // Assertion 2: Send failed
-                std.debug.assert(true);
-                return .csv;
-            };
-        } else {
-            self.tcp_client.?.send(csv_order) catch {
-                std.debug.assert(true);
-                return .csv;
-            };
-        }
+        const csv_order = "N, 1, ZZPROBE, 1, 1, B, 999999999\n";
+        self.tcp_client.?.send(csv_order) catch {
+            // Assertion 2: Send failed
+            std.debug.assert(true);
+            return .csv;
+        };
 
         std.time.sleep(PROTOCOL_DETECT_TIMEOUT_MS * std.time.ns_per_ms);
 
@@ -395,36 +360,19 @@ pub const EngineClient = struct {
             return .csv;
         };
 
-        // Skip frame header if present
-        const payload = if (self.config.use_framing and response.len > 4)
-            response[4..]
-        else
-            response;
-
         // Check if server responded with binary to our CSV
-        if (payload.len > 0 and binary.isBinaryProtocol(payload)) {
+        if (response.len > 0 and binary.isBinaryProtocol(response)) {
             // Server is binary-only, cancel with binary format
             const cancel = types.BinaryCancel.init(1, PROBE_SYMBOL, PROBE_ORDER_ID_CSV);
-            const cancel_data = cancel.asBytes();
-            if (self.config.use_framing) {
-                const framed = self.frameMessage(cancel_data);
-                self.tcp_client.?.send(framed) catch {};
-            } else {
-                self.tcp_client.?.send(cancel_data) catch {};
-            }
+            self.tcp_client.?.send(cancel.asBytes()) catch {};
             self.drainResponses();
             return .binary;
         }
 
         // Got CSV response (or no response), clean up with CSV cancel
         if (response.len > 0) {
-            const cancel_csv = "C, 1, ZZPROBE, 999999999\n"; // PROBE_ORDER_ID_CSV
-            if (self.config.use_framing) {
-                const framed = self.frameMessage(cancel_csv);
-                self.tcp_client.?.send(framed) catch {};
-            } else {
-                self.tcp_client.?.send(cancel_csv) catch {};
-            }
+            const cancel_csv = "C, 1, ZZPROBE, 999999999\n";
+            self.tcp_client.?.send(cancel_csv) catch {};
             self.drainResponses();
         }
 
@@ -475,10 +423,22 @@ pub const EngineClient = struct {
         return self.detected_protocol;
     }
 
+    /// Get discovery result.
+    pub fn getDiscoveryResult(self: *const Self) DiscoveryResult {
+        return .{
+            .transport = self.detected_transport,
+            .protocol = self.detected_protocol,
+        };
+    }
+
+    // ============================================================
+    // Order Operations
+    // ============================================================
+
     /// Send a new order.
     ///
     /// Parameters:
-    ///   user_id - User identifier
+    ///   user_id - User identifier (typically 1 for self)
     ///   symbol - Trading symbol (max 8 chars)
     ///   price - Price in cents
     ///   quantity - Order quantity
@@ -581,7 +541,8 @@ pub const EngineClient = struct {
         self.messages_sent +|= 1;
     }
 
-    /// Send raw bytes (with framing if configured for TCP).
+    /// Send raw bytes.
+    /// NOTE: TcpClient handles framing internally - do NOT add framing here.
     ///
     /// Parameters:
     ///   data - Raw bytes to send
@@ -593,38 +554,14 @@ pub const EngineClient = struct {
         std.debug.assert(self.isConnected());
 
         if (self.tcp_client) |*client| {
-            if (self.config.use_framing) {
-                // Add 4-byte big-endian length prefix
-                const framed = self.frameMessage(data);
-                try client.send(framed);
-            } else {
-                try client.send(data);
-            }
+            // TcpClient handles framing internally
+            try client.send(data);
         } else if (self.udp_client) |*client| {
-            // UDP doesn't use framing
             try client.send(data);
         } else {
             self.send_errors +|= 1;
             return error.NotConnected;
         }
-    }
-
-    /// Frame a message with 4-byte big-endian length prefix.
-    fn frameMessage(self: *Self, data: []const u8) []const u8 {
-        // Assertion 1: Data fits in frame buffer
-        std.debug.assert(data.len + 4 <= self.frame_buf.len);
-
-        // Write 4-byte big-endian length
-        const len: u32 = @intCast(data.len);
-        std.mem.writeInt(u32, self.frame_buf[0..4], len, .big);
-
-        // Copy payload
-        @memcpy(self.frame_buf[4..][0..data.len], data);
-
-        // Assertion 2: Framed message is correct size
-        std.debug.assert(self.frame_buf[0..4 + data.len].len == data.len + 4);
-
-        return self.frame_buf[0 .. 4 + data.len];
     }
 
     /// Receive the next response message.
@@ -649,9 +586,10 @@ pub const EngineClient = struct {
         }
     }
 
-    /// Receive raw response bytes (strips frame header if framing enabled).
+    /// Receive raw response bytes.
+    /// NOTE: TcpClient strips frame header internally.
     ///
-    /// Returns: Raw response data (payload only, no frame header)
+    /// Returns: Raw response data (payload only)
     pub fn recvRaw(self: *Self) ![]const u8 {
         // Assertion 1: Should be connected
         std.debug.assert(self.isConnected());
@@ -660,11 +598,6 @@ pub const EngineClient = struct {
             const data = try client.recv();
             // Assertion 2: Got data from TCP
             std.debug.assert(data.len > 0 or data.len == 0); // May be empty on timeout
-
-            // Strip frame header if framing is enabled
-            if (self.config.use_framing and data.len > 4) {
-                return data[4..];
-            }
             return data;
         } else if (self.udp_client) |*client| {
             const data = try client.recv();
@@ -704,7 +637,8 @@ pub const EngineClient = struct {
         return null;
     }
 
-    /// Try to receive raw bytes with timeout (strips frame header if enabled).
+    /// Try to receive raw bytes with timeout.
+    /// NOTE: TcpClient strips frame header internally.
     ///
     /// Parameters:
     ///   timeout_ms - Timeout in milliseconds
@@ -715,18 +649,10 @@ pub const EngineClient = struct {
         std.debug.assert(@intFromPtr(self) != 0);
 
         if (self.tcp_client) |*client| {
-            const data = client.tryRecv(timeout_ms) catch |err| {
+            return client.tryRecv(timeout_ms) catch |err| {
                 if (err == error.WouldBlock or err == error.Timeout) return null;
                 return err;
             };
-            if (data) |d| {
-                // Strip frame header if framing is enabled
-                if (self.config.use_framing and d.len > 4) {
-                    return d[4..];
-                }
-                return d;
-            }
-            return null;
         } else if (self.udp_client) |*client| {
             // TODO: Implement proper timeout for UDP using SO_RCVTIMEO
             // For now, do a non-blocking recv attempt (timeout_ms ignored for UDP)
@@ -805,9 +731,8 @@ pub const EngineClient = struct {
             self.udp_client = null;
         }
 
-        // Assertion 2: All connections closed
-        std.debug.assert(self.tcp_client == null);
-        std.debug.assert(self.udp_client == null);
+        // Assertion 2: Disconnected
+        std.debug.assert(!self.isConnected());
     }
 };
 
@@ -815,20 +740,26 @@ pub const EngineClient = struct {
 // Convenience Functions
 // ============================================================
 
-/// Create a TCP binary client (most common configuration).
+/// Create a client with default settings (auto-detect everything).
 ///
 /// Parameters:
 ///   host - Server hostname or IP
 ///   port - Server port
+pub fn connect(host: []const u8, port: u16) !EngineClient {
+    return EngineClient.init(.{
+        .host = host,
+        .port = port,
+        .transport = .auto,
+        .protocol = .auto,
+    });
+}
+
+/// Create a TCP client with binary protocol.
 ///
-/// Returns: Connected client
+/// Parameters:
+///   host - Server hostname or IP
+///   port - Server port
 pub fn connectTcpBinary(host: []const u8, port: u16) !EngineClient {
-    // Assertion 1: Host should be valid
-    std.debug.assert(host.len > 0);
-
-    // Assertion 2: Port should be valid
-    std.debug.assert(port > 0);
-
     return EngineClient.init(.{
         .host = host,
         .port = port,
@@ -837,42 +768,12 @@ pub fn connectTcpBinary(host: []const u8, port: u16) !EngineClient {
     });
 }
 
-/// Create a UDP binary client.
+/// Create a TCP client with CSV protocol.
 ///
 /// Parameters:
 ///   host - Server hostname or IP
 ///   port - Server port
-///
-/// Returns: Connected client
-pub fn connectUdpBinary(host: []const u8, port: u16) !EngineClient {
-    // Assertion 1: Host should be valid
-    std.debug.assert(host.len > 0);
-
-    // Assertion 2: Port should be valid
-    std.debug.assert(port > 0);
-
-    return EngineClient.init(.{
-        .host = host,
-        .port = port,
-        .transport = .udp,
-        .protocol = .binary,
-    });
-}
-
-/// Create a TCP CSV client (useful for debugging).
-///
-/// Parameters:
-///   host - Server hostname or IP
-///   port - Server port
-///
-/// Returns: Connected client
 pub fn connectTcpCsv(host: []const u8, port: u16) !EngineClient {
-    // Assertion 1: Host should be valid
-    std.debug.assert(host.len > 0);
-
-    // Assertion 2: Port should be valid
-    std.debug.assert(port > 0);
-
     return EngineClient.init(.{
         .host = host,
         .port = port,
