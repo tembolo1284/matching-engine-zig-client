@@ -499,13 +499,13 @@ fn printResponse(msg: OutputMessage, stderr: anytype) !void {
             });
         },
         .trade => {
-            try stderr.print("[RECV] T, {s}, {d}, {d}, {d}, {d}, {d}, {d}\n", .{
+            try stderr.print("[RECV] T, {s}, {d}, {d}, {d}, {d}, {d:.2}, {d}\n", .{
                 symbol,
                 msg.buy_user_id,
                 msg.buy_order_id,
                 msg.sell_user_id,
                 msg.sell_order_id,
-                msg.price,
+                msg.price / 100.0,
                 msg.quantity,
             });
         },
@@ -525,11 +525,9 @@ fn printResponse(msg: OutputMessage, stderr: anytype) !void {
                     side_char,
                 });
             } else {
-                try stderr.print("[RECV] B, {s}, {c}, {d}, {d}\n", .{
+                try stderr.print("[RECV] B, {s}, {c}, -, -\n", .{
                     symbol,
                     side_char,
-                    msg.price,
-                    msg.quantity,
                 });
             }
         },

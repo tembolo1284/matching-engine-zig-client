@@ -851,12 +851,12 @@ fn printResponse(msg: OutputMessage, stderr: anytype) !void {
     switch (msg.msg_type) {
         .ack => try stderr.print("[RECV] A, {s}, {d}, {d}\n", .{ symbol, msg.user_id, msg.order_id }),
         .cancel_ack => try stderr.print("[RECV] C, {s}, {d}, {d}\n", .{ symbol, msg.user_id, msg.order_id }),
-        .trade => try stderr.print("[RECV] T, {s}, {d}, {d}, {d}, {d}, {d}, {d}\n", .{
-            symbol, msg.buy_user_id, msg.buy_order_id, msg.sell_user_id, msg.sell_order_id, msg.price, msg.quantity,
+        .trade => try stderr.print("[RECV] T, {s}, {d}, {d}, {d}, {d}, {d:.2}, {d}\n", .{
+            symbol, msg.buy_user_id, msg.buy_order_id, msg.sell_user_id, msg.sell_order_id, msg.price / 100.0, msg.quantity,
         }),
         .top_of_book => {
             const side_char: u8 = if (msg.side) |s| @intFromEnum(s) else '-';
-            try stderr.print("[RECV] B, {s}, {c}, {d}, {d}\n", .{ symbol, side_char, msg.price, msg.quantity });
+            try stderr.print("[RECV] B, {s}, {c}, {d}, {d}\n", .{ symbol, side_char, msg.price / 100.0, msg.quantity });
         },
         .reject => try stderr.print("[RECV] R, {s}, {d}, {d}, reason={d}\n", .{ symbol, msg.user_id, msg.order_id, msg.reject_reason }),
     }
