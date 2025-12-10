@@ -326,36 +326,35 @@ pub const EngineClient = struct {
         // Assertion 1: TCP client must exist
         std.debug.assert(self.tcp_client != null);
 
-        // Use CSV-specific order ID to avoid duplicate key with binary probe
-        const csv_order = "N, 1, ZZPROBE, 1, 1, B, 999999999\n";
-        self.tcp_client.?.send(csv_order) catch {
-            // Assertion 2: Send failed
-            std.debug.assert(true);
+        // Send cancel for non-existent order - server rejects but creates NO state!
+        var buf: [types.MAX_CSV_LEN]u8 = undefined;
+        const cancel_csv = std.fmt.bufPrint(&buf, "C, 1, {s}, {d}\n", .{
+            PROBE_SYMBOL,
+            PROBE_ORDER_ID_CSV,
+        }) catch return .csv;
+
+        self.tcp_client.?.send(cancel_csv) catch {
+            std.debug.print("DEBUG probeCsv: send failed\n", .{});
             return .csv;
         };
 
+        // Wait for response
         std.time.sleep(PROTOCOL_DETECT_TIMEOUT_MS * std.time.ns_per_ms);
 
-        const response = self.tcp_client.?.recv() catch {
+        // Try to receive response
+        const response = self.tcp_client.?.recv() catch |err| {
+            std.debug.print("DEBUG probeCsv: recv failed: {}\n", .{err});
             return .csv;
         };
 
-        // Check if server responded with binary to our CSV
-        if (response.len > 0 and binary.isBinaryProtocol(response)) {
-            // Server is binary-only, cancel with binary format
-            const cancel = types.BinaryCancel.init(1, PROBE_SYMBOL, PROBE_ORDER_ID_CSV);
-            self.tcp_client.?.send(cancel.asBytes()) catch {};
+        // Check for CSV response (R for reject, X for cancel ack, C for cancel)
+        if (response.len > 0 and (response[0] == 'R' or response[0] == 'X' or response[0] == 'C')) {
+            std.debug.print("DEBUG probeCsv: CSV detected\n", .{});
             self.drainResponses();
-            return .binary;
+            return .csv;
         }
 
-        // Got CSV response (or no response), clean up with CSV cancel
-        if (response.len > 0) {
-            const cancel_csv = "C, 1, ZZPROBE, 999999999\n";
-            self.tcp_client.?.send(cancel_csv) catch {};
-            self.drainResponses();
-        }
-
+        std.debug.print("DEBUG probeCsv: No valid response\n", .{});
         return .csv;
     }
 
