@@ -17,6 +17,19 @@ const std = @import("std");
 const builtin = @import("builtin");
 
 // ============================================================
+// Platform Detection and Constants
+// ============================================================
+
+const is_darwin = builtin.os.tag.isDarwin();
+const is_linux = builtin.os.tag == .linux;
+
+// TCP_NODELAY is 1 on both Linux and macOS
+const TCP_NODELAY: u32 = 1;
+
+// IPPROTO_TCP is 6 on all platforms
+const IPPROTO_TCP: u32 = 6;
+
+// ============================================================
 // Types
 // ============================================================
 
@@ -476,12 +489,14 @@ fn applyOptions(handle: Handle, options: Options) SocketError!void {
 
     if (options.tcp_nodelay) {
         // TCP_NODELAY - only applies to TCP sockets, ignore errors for UDP
-        std.posix.setsockopt(
+        // Use raw setsockopt with our cross-platform constants
+        _ = std.c.setsockopt(
             handle,
-            std.posix.IPPROTO.TCP,
-            std.c.TCP.NODELAY,
+            IPPROTO_TCP,
+            TCP_NODELAY,
             &std.mem.toBytes(@as(c_int, 1)),
-        ) catch {};
+            @sizeOf(c_int),
+        );
     }
 
     if (options.recv_buffer_size > 0) {
