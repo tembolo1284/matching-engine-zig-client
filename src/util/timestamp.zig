@@ -182,14 +182,16 @@ pub const LatencyTracker = struct {
     ///   latency_ns - Latency to record in nanoseconds
     ///
     /// Note: Uses saturating addition for sum to prevent overflow.
-    /// Samples exceeding MAX_REASONABLE_LATENCY_NS are clamped in debug mode.
+    /// Extremely large values are handled gracefully via saturating arithmetic.
     pub fn record(self: *Self, latency_ns: u64) void {
         // Assertion 1: Self pointer must be valid
         std.debug.assert(@intFromPtr(self) != 0);
 
-        // Assertion 2: Latency should be reasonable (warn but don't reject)
-        // In release mode, we still record it but it may indicate a problem
-        std.debug.assert(latency_ns <= MAX_REASONABLE_LATENCY_NS);
+        // Assertion 2: Self state should be valid
+        // Note: We intentionally do NOT assert latency_ns <= MAX_REASONABLE_LATENCY_NS
+        // because saturating arithmetic handles overflow safely, and tests need
+        // to verify saturation behavior with extreme values.
+        std.debug.assert(self.count < std.math.maxInt(u64));
 
         // Update min/max
         if (latency_ns < self.min) self.min = latency_ns;
@@ -570,7 +572,7 @@ test "latency tracker reset" {
 test "latency tracker saturating arithmetic" {
     var tracker = LatencyTracker.init();
 
-    // Record max value - should not overflow
+    // Record max value - should not overflow due to saturating arithmetic
     tracker.record(std.math.maxInt(u64) / 2);
     tracker.record(std.math.maxInt(u64) / 2);
     tracker.record(std.math.maxInt(u64) / 2);

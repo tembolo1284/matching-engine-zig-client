@@ -98,7 +98,7 @@ pub fn decodeOutput(data: []const u8) DecodeError!types.OutputMessage {
     };
 }
 
-/// Decode ACK message (19 bytes).
+/// Decode ACK message (18 bytes).
 fn decodeAck(data: []const u8) DecodeError!types.OutputMessage {
     const msg_size = @sizeOf(types.BinaryAck);
 
@@ -124,7 +124,7 @@ fn decodeAck(data: []const u8) DecodeError!types.OutputMessage {
     };
 }
 
-/// Decode CANCEL_ACK message (19 bytes).
+/// Decode CANCEL_ACK message (18 bytes).
 fn decodeCancelAck(data: []const u8) DecodeError!types.OutputMessage {
     const msg_size = @sizeOf(types.BinaryCancelAck);
 
@@ -202,7 +202,7 @@ fn decodeTopOfBook(data: []const u8) DecodeError!types.OutputMessage {
 /// Encode a new order as binary.
 ///
 /// # Arguments
-/// - `buf`: Output buffer (must be at least 30 bytes)
+/// - `buf`: Output buffer (must be at least 27 bytes)
 /// - Other args: Order parameters
 ///
 /// # Returns
@@ -360,21 +360,20 @@ test "detect binary protocol" {
 }
 
 test "decode binary ack" {
-    // Manually construct a binary ack message
-    var data: [19]u8 = undefined;
+    // Manually construct a binary ack message (18 bytes - matches server)
+    var data: [18]u8 = undefined;
     data[0] = types.MAGIC_BYTE;
     data[1] = @intFromEnum(types.OutputMsgType.ack);
 
-    // Symbol "IBM" null-padded
+    // Symbol "IBM" null-padded (8 bytes at offset 2)
     @memcpy(data[2..5], "IBM");
     @memset(data[5..10], 0);
 
-    // user_id = 1 (big-endian)
+    // user_id = 1 (big-endian, 4 bytes at offset 10)
     std.mem.writeInt(u32, data[10..14], 1, .big);
 
-    // order_id = 1001 (big-endian)
+    // order_id = 1001 (big-endian, 4 bytes at offset 14)
     std.mem.writeInt(u32, data[14..18], 1001, .big);
-    data[18] = 0; // padding
 
     const msg = try decodeOutput(&data);
     try std.testing.expectEqual(types.OutputMsgType.ack, msg.msg_type);
@@ -452,7 +451,8 @@ test "encode new order" {
 
     const encoded = try encodeNewOrder(&buf, 1, "IBM", 10000, 50, .buy, 1001);
 
-    try std.testing.expectEqual(@as(usize, 30), encoded.len);
+    // Wire size is 27 bytes (matches server's binary_codec.zig)
+    try std.testing.expectEqual(@as(usize, 27), encoded.len);
     try std.testing.expectEqual(types.MAGIC_BYTE, encoded[0]);
     try std.testing.expectEqual(@as(u8, 'N'), encoded[1]);
 }
@@ -462,7 +462,8 @@ test "encode cancel" {
 
     const encoded = try encodeCancel(&buf, 1, "IBM", 1001);
 
-    try std.testing.expectEqual(@as(usize, 19), encoded.len);
+    // Wire size is 18 bytes (matches server's binary_codec.zig)
+    try std.testing.expectEqual(@as(usize, 18), encoded.len);
     try std.testing.expectEqual(types.MAGIC_BYTE, encoded[0]);
     try std.testing.expectEqual(@as(u8, 'C'), encoded[1]);
 }
