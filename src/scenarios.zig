@@ -166,10 +166,10 @@ fn runScenario1(client: *EngineClient, stderr: anytype) !void {
 fn runScenario2(client: *EngineClient, stderr: anytype) !void {
     try stderr.print("=== Scenario 2: Matching Trade ===\n\n", .{});
     try client.sendNewOrder(1, "IBM", 100, 50, .buy, 1);
-    std.time.sleep(100 * std.time.ns_per_ms);
+    std.time.sleep(75 * std.time.ns_per_ms);
     try recvAndPrintResponses(client, stderr);
     try client.sendNewOrder(1, "IBM", 100, 50, .sell, 2);
-    std.time.sleep(100 * std.time.ns_per_ms);
+    std.time.sleep(75 * std.time.ns_per_ms);
     try recvAndPrintResponses(client, stderr);
     
     // Cleanup
