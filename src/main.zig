@@ -499,13 +499,14 @@ fn printResponse(msg: OutputMessage, stderr: anytype) !void {
             });
         },
         .trade => {
-            try stderr.print("[RECV] T, {s}, {d}, {d}, {d}, {d}, {d:.2}, {d}\n", .{
+            try stderr.print("[RECV] T, {s}, {d}, {d}, {d}, {d}, {d}.{d:0>2}, {d}\n", .{
                 symbol,
                 msg.buy_user_id,
                 msg.buy_order_id,
                 msg.sell_user_id,
                 msg.sell_order_id,
-                msg.price / 100.0,
+                msg.price / 100,
+                msg.price % 100,
                 msg.quantity,
             });
         },
