@@ -797,14 +797,14 @@ fn recvAndPrintResponses(client: *EngineClient, stderr: anytype) !void {
     const proto = client.getProtocol();
     if (client.tcp_client) |*tcp_client| {
         var count: u32 = 0;
-        std.time.sleep(50 * std.time.ns_per_ms);
+        std.time.sleep(35 * std.time.ns_per_ms);
         while (count < 20) : (count += 1) {
             const raw_data = tcp_client.recv() catch break;
             try printRawResponse(raw_data, proto, stderr);
         }
     } else if (client.udp_client) |*udp_client| {
         var count: u32 = 0;
-        std.time.sleep(50 * std.time.ns_per_ms);
+        std.time.sleep(35 * std.time.ns_per_ms);
         while (count < 20) : (count += 1) {
             const raw_data = udp_client.recv() catch break;
             try printBatchedResponses(raw_data, proto, stderr);
@@ -852,11 +852,11 @@ fn printResponse(msg: OutputMessage, stderr: anytype) !void {
         .ack => try stderr.print("[RECV] A, {s}, {d}, {d}\n", .{ symbol, msg.user_id, msg.order_id }),
         .cancel_ack => try stderr.print("[RECV] C, {s}, {d}, {d}\n", .{ symbol, msg.user_id, msg.order_id }),
         .trade => try stderr.print("[RECV] T, {s}, {d}, {d}, {d}, {d}, {d}.{d:0>2}, {d}\n", .{
-            symbol, msg.buy_user_id, msg.buy_order_id, msg.sell_user_id, msg.sell_order_id, msg.price / 100, msg.price % 100, msg.quantity,
+            symbol, msg.buy_user_id, msg.buy_order_id, msg.sell_user_id, msg.sell_order_id, msg.price, msg.price % 100, msg.quantity,
         }),
         .top_of_book => {
             const side_char: u8 = if (msg.side) |s| @intFromEnum(s) else '-';
-            try stderr.print("[RECV] B, {s}, {c}, {d}.{d:0>2}, {d}\n", .{ symbol, side_char, msg.price / 100, msg.price % 100, msg.quantity });
+            try stderr.print("[RECV] B, {s}, {c}, {d}.{d:0>2}, {d}\n", .{ symbol, side_char, msg.price, msg.price % 100, msg.quantity });
         },
         .reject => try stderr.print("[RECV] R, {s}, {d}, {d}, reason={d}\n", .{ symbol, msg.user_id, msg.order_id, msg.reject_reason }),
     }
