@@ -1,4 +1,4 @@
-u/! Test scenarios for the matching engine client.
+//! Test scenarios for the matching engine client.
 //! Uses interleaved send/receive with tryRecv for high-volume tests.
 
 const std = @import("std");
@@ -611,7 +611,7 @@ fn tryRecvAndCount(client: *EngineClient) !ResponseStats {
     const proto = client.getProtocol();
 
     if (client.tcp_client) |*tcp_client| {
-        const maybe_data = tcp_client.tryRecv(10) catch |err| {  // 10ms poll timeout
+        const maybe_data = tcp_client.tryRecv(1) catch |err| {  // 10ms poll timeout
             if (err == error.WouldBlock or err == error.Timeout) {
                 return stats;
             }
