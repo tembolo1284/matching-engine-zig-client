@@ -161,6 +161,7 @@ fn runScenario1(client: *EngineClient, stderr: anytype) !void {
     try stderr.print("\n[FLUSH] Cleaning up server state\n", .{});
     try client.sendFlush();
     std.time.sleep(100 * std.time.ns_per_ms);
+    try recvAndPrintResponses(client, stderr);
 }
 
 fn runScenario2(client: *EngineClient, stderr: anytype) !void {
@@ -176,6 +177,7 @@ fn runScenario2(client: *EngineClient, stderr: anytype) !void {
     try stderr.print("\n[FLUSH] Cleaning up server state\n", .{});
     try client.sendFlush();
     std.time.sleep(100 * std.time.ns_per_ms);
+    try recvAndPrintResponses(client, stderr);
 }
 
 fn runScenario3(client: *EngineClient, stderr: anytype) !void {
@@ -191,6 +193,7 @@ fn runScenario3(client: *EngineClient, stderr: anytype) !void {
     try stderr.print("\n[FLUSH] Cleaning up server state\n", .{});
     try client.sendFlush();
     std.time.sleep(100 * std.time.ns_per_ms);
+    try recvAndPrintResponses(client, stderr);
 }
 
 // ============================================================
@@ -856,7 +859,11 @@ fn printResponse(msg: OutputMessage, stderr: anytype) !void {
         }),
         .top_of_book => {
             const side_char: u8 = if (msg.side) |s| @intFromEnum(s) else '-';
-            try stderr.print("[RECV] B, {s}, {c}, {d}.{d:0>2}, {d}\n", .{ symbol, side_char, msg.price, msg.price % 100, msg.quantity });
+            if (msg.price == 0 and msg.quantity == 0) {
+                try stderr.print("[RECV] B, {s}, {c}, -, -\n", .{ symbol, side_char});
+            } else {
+                try stderr.print("[RECV] B, {s}, {c}, {d}.{d:0>2}, {d}\n", .{ symbol, side_char, msg.price, msg.price % 100, msg.quantity });
+            }
         },
         .reject => try stderr.print("[RECV] R, {s}, {d}, {d}, reason={d}\n", .{ symbol, msg.user_id, msg.order_id, msg.reject_reason }),
     }
