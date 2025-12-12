@@ -1,4 +1,4 @@
-//! Test scenarios for the matching engine client.
+u/! Test scenarios for the matching engine client.
 //! Uses interleaved send/receive with tryRecv for high-volume tests.
 
 const std = @import("std");
@@ -672,8 +672,8 @@ fn drainResponses(client: *EngineClient, timeout_ms: u32) !ResponseStats {
     var consecutive_empty: u32 = 0;
  
     // Use longer poll timeout and higher empty threshold for reliability
-    const poll_timeout_ms: i32 = if (timeout_ms <= 60_000) 50 else 100;
-    const max_consecutive_empty: u32 = if (timeout_ms <= 60_000) 20 else 100;
+    const poll_timeout_ms: i32 = if (timeout_ms <= 60_000) 35 else 75;
+    const max_consecutive_empty: u32 = if (timeout_ms <= 60_000) 10 else 75;
 
     while (timestamp.now() - start_time < timeout_ns) {
         // Use blocking recv with timeout for more reliable draining
@@ -724,7 +724,7 @@ fn drainResponses(client: *EngineClient, timeout_ms: u32) !ResponseStats {
                 if (consecutive_empty > max_consecutive_empty) {
                     break;
                 }
-                std.time.sleep(5 * std.time.ns_per_ms);
+                std.time.sleep(2 * std.time.ns_per_ms);
             }
         }
     }
