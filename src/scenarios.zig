@@ -670,10 +670,10 @@ fn drainResponses(client: *EngineClient, timeout_ms: u32) !ResponseStats {
     const start_time = timestamp.now();
     const timeout_ns: u64 = @as(u64, timeout_ms) * std.time.ns_per_ms;
     var consecutive_empty: u32 = 0;
-    
+ 
     // Use longer poll timeout and higher empty threshold for reliability
-    const poll_timeout_ms: i32 = 100; // 100ms poll for better batching
-    const max_consecutive_empty: u32 = 1000; // 1000 * 100ms = 100 seconds of idle before giving up
+    const poll_timeout_ms: i32 = if (timeout_ms <= 60_000) 50 else 100;
+    const max_consecutive_empty: u32 = if (timeout_ms <= 60_000) 20 else 100;
 
     while (timestamp.now() - start_time < timeout_ns) {
         // Use blocking recv with timeout for more reliable draining
