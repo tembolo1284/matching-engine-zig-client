@@ -264,21 +264,21 @@ const ThreadedTestState = struct {
     top_of_book: std.atomic.Value(u64) = std.atomic.Value(u64).init(0),
     rejects: std.atomic.Value(u64) = std.atomic.Value(u64).init(0),
     parse_errors: std.atomic.Value(u64) = std.atomic.Value(u64).init(0),
-
+    
     send_complete: std.atomic.Value(bool) = std.atomic.Value(bool).init(false),
     recv_should_stop: std.atomic.Value(bool) = std.atomic.Value(bool).init(false),
-
+    
     expected_acks: u64 = 0,
     expected_trades: u64 = 0,
     expected_total: u64 = 0,
-
+    
     pub fn totalReceived(self: *const ThreadedTestState) u64 {
-        return self.acks.load(.monotonic) +
-               self.trades.load(.monotonic) +
-               self.top_of_book.load(.monotonic) +
+        return self.acks.load(.monotonic) + 
+               self.trades.load(.monotonic) + 
+               self.top_of_book.load(.monotonic) + 
                self.rejects.load(.monotonic);
     }
-
+    
     pub fn toResponseStats(self: *const ThreadedTestState) ResponseStats {
         return .{
             .acks = self.acks.load(.monotonic),
@@ -301,18 +301,18 @@ fn recvThreadFn(ctx: *RecvThreadContext) void {
     const client = ctx.client;
     const state = ctx.state;
     const proto = client.getProtocol();
-
+    
     var consecutive_empty: u32 = 0;
     const max_empty_after_done: u32 = 200;  // 200 * 10ms = 2 seconds of quiet
-
+    
     while (true) {
         if (state.recv_should_stop.load(.monotonic)) break;
-
+        
         if (state.send_complete.load(.monotonic)) {
             if (state.totalReceived() >= state.expected_total) break;
             if (consecutive_empty > max_empty_after_done) break;
         }
-
+        
         if (client.tcp_client) |*tcp_client| {
             const maybe_data = tcp_client.tryRecv(10) catch |err| {
                 if (err == error.WouldBlock or err == error.Timeout) {
@@ -321,10 +321,10 @@ fn recvThreadFn(ctx: *RecvThreadContext) void {
                 }
                 break;
             };
-
+            
             if (maybe_data) |raw_data| {
                 consecutive_empty = 0;
-
+                
                 if (proto == .binary) {
                     if (binary.decodeOutput(raw_data)) |msg| {
                         countMessageAtomic(state, msg);
@@ -407,9 +407,14 @@ fn runMatchingStressThreaded(client: *EngineClient, stderr: std.fs.File, trades:
     var pairs_sent: u64 = 0;
     var last_progress: u64 = 0;
 
+    // Throttling: send in batches, pause briefly to let server catch up
+    // This prevents overwhelming the server's buffers
+    const batch_size: u64 = 500;  // Send 500 pairs, then brief pause
+    const batch_pause_ns: u64 = 100_000;  // 100 microseconds between batches
+
     const start_time = timestamp.now();
 
-    // SEND LOOP - blast orders as fast as TCP allows
+    // SEND LOOP - fast but throttled to prevent buffer overflow
     var i: u64 = 0;
     while (i < trades) : (i += 1) {
         const price: u32 = 100 + @as(u32, @intCast(i % 50));
@@ -430,14 +435,19 @@ fn runMatchingStressThreaded(client: *EngineClient, stderr: std.fs.File, trades:
 
         pairs_sent += 1;
 
+        // Throttle: brief pause every batch_size pairs
+        if (pairs_sent % batch_size == 0) {
+            std.Thread.sleep(batch_pause_ns);
+        }
+
         if (!quiet and progress_interval > 0 and i > 0 and i / progress_interval > last_progress) {
             last_progress = i / progress_interval;
             const pct = (i * 100) / trades;
             const elapsed = (timestamp.now() - start_time) / 1_000_000;
             const rate: u64 = if (elapsed > 0) pairs_sent * 1000 / elapsed else 0;
             const received = state.totalReceived();
-            try print(stderr, "  {d}% | {d} pairs | {d} ms | {d} trades/sec | recv'd: {d} | errs: {d}\n", .{
-                pct, pairs_sent, elapsed, rate, received, send_errors
+            try print(stderr, "  {d}% | {d} pairs | {d} ms | {d} trades/sec | recv'd: {d} | errs: {d}\n", .{ 
+                pct, pairs_sent, elapsed, rate, received, send_errors 
             });
         }
     }
@@ -463,15 +473,15 @@ fn runMatchingStressThreaded(client: *EngineClient, stderr: std.fs.File, trades:
     }
 
     try print(stderr, "\nWaiting for recv thread (received so far: {d})...\n", .{state.totalReceived()});
-
+    
     const wait_start = timestamp.now();
     const max_wait_ns: u64 = 60 * NS_PER_SEC;
-
+    
     while (timestamp.now() - wait_start < max_wait_ns) {
         if (state.totalReceived() >= state.expected_total) break;
         std.Thread.sleep(100 * NS_PER_MS);
     }
-
+    
     state.recv_should_stop.store(true, .monotonic);
     recv_thread.join();
 
@@ -545,6 +555,10 @@ fn runDualProcessorStressThreaded(client: *EngineClient, stderr: std.fs.File, tr
     var pairs_sent: u64 = 0;
     var last_progress: u64 = 0;
 
+    // Throttling to prevent buffer overflow
+    const batch_size: u64 = 500;
+    const batch_pause_ns: u64 = 100_000;  // 100 microseconds
+
     const start_time = timestamp.now();
 
     var i: u64 = 0;
@@ -568,14 +582,19 @@ fn runDualProcessorStressThreaded(client: *EngineClient, stderr: std.fs.File, tr
 
         pairs_sent += 1;
 
+        // Throttle
+        if (pairs_sent % batch_size == 0) {
+            std.Thread.sleep(batch_pause_ns);
+        }
+
         if (!quiet and progress_interval > 0 and i > 0 and i / progress_interval > last_progress) {
             last_progress = i / progress_interval;
             const pct = (i * 100) / trades;
             const elapsed = (timestamp.now() - start_time) / 1_000_000;
             const rate: u64 = if (elapsed > 0) pairs_sent * 1000 / elapsed else 0;
             const received = state.totalReceived();
-            try print(stderr, "  {d}% | {d} pairs | {d} ms | {d} trades/sec | recv'd: {d} | errs: {d}\n", .{
-                pct, pairs_sent, elapsed, rate, received, send_errors
+            try print(stderr, "  {d}% | {d} pairs | {d} ms | {d} trades/sec | recv'd: {d} | errs: {d}\n", .{ 
+                pct, pairs_sent, elapsed, rate, received, send_errors 
             });
         }
     }
@@ -601,15 +620,15 @@ fn runDualProcessorStressThreaded(client: *EngineClient, stderr: std.fs.File, tr
     }
 
     try print(stderr, "\nWaiting for recv thread...\n", .{});
-
+    
     const wait_start = timestamp.now();
     const max_wait_ns: u64 = 60 * NS_PER_SEC;
-
+    
     while (timestamp.now() - wait_start < max_wait_ns) {
         if (state.totalReceived() >= state.expected_total) break;
         std.Thread.sleep(100 * NS_PER_MS);
     }
-
+    
     state.recv_should_stop.store(true, .monotonic);
     recv_thread.join();
 
@@ -815,7 +834,11 @@ fn printResponse(msg: types.OutputMessage, stderr: std.fs.File) !void {
         .reject => try print(stderr, "[RECV] R, {s}, {d}, {d}, {d}\n", .{ symbol, msg.user_id, msg.order_id, msg.reject_reason }),
         .top_of_book => {
             const side_char: u8 = if (msg.side) |s| @intFromEnum(s) else '-';
-            try print(stderr, "[RECV] B, {s}, {c}, {d}, {d}\n", .{ symbol, side_char, msg.price, msg.quantity });
+            if (msg.price == 0 and msg.quantity == 0) {
+                try print(stderr, "[RECV] B, {s}, {c}, -, -\n", .{ symbol, side_char });
+            } else {
+                try print(stderr, "[RECV] B, {s}, {c}, {d}, {d}\n", .{ symbol, side_char, msg.price, msg.quantity });
+            }
         },
     }
 }
