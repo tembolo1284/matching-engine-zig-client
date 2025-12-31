@@ -509,7 +509,7 @@ pub fn formatDuration(ns: u64, buf: []u8) []const u8 {
 
 test "timestamp basic" {
     const t1 = now();
-    std.time.sleep(1_000_000); // 1ms
+    std.Thread.sleep(1_000_000); // 1ms
     const t2 = now();
 
     try std.testing.expect(t2 > t1);
@@ -518,7 +518,7 @@ test "timestamp basic" {
 
 test "elapsed calculation" {
     const start = now();
-    std.time.sleep(1_000_000); // 1ms
+    std.Thread.sleep(1_000_000); // 1ms
     const ns = elapsed(start);
 
     // Should be at least 1ms
@@ -604,7 +604,7 @@ test "scoped timer" {
     {
         var timer = ScopedTimer.start(&tracker);
         try std.testing.expect(!timer.isStopped());
-        std.time.sleep(1_000_000); // 1ms
+        std.Thread.sleep(1_000_000); // 1ms
         timer.stop();
         try std.testing.expect(timer.isStopped());
     }
@@ -629,7 +629,7 @@ test "scoped timer elapsed without stop" {
     var tracker = LatencyTracker.init();
 
     var timer = ScopedTimer.start(&tracker);
-    std.time.sleep(1_000_000); // 1ms
+    std.Thread.sleep(1_000_000); // 1ms
 
     const intermediate = timer.elapsed_ns();
     try std.testing.expect(intermediate >= 1_000_000);
