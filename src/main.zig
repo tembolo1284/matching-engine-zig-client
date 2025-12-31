@@ -69,6 +69,34 @@ const Command = enum {
     benchmark,
 };
 
+// ============================================================
+// Helper Functions for Zig 0.15 IO
+// ============================================================
+
+/// Helper for formatted printing to a File
+fn print(file: std.fs.File, comptime fmt: []const u8, args: anytype) !void {
+    var buf: [4096]u8 = undefined;
+    const msg = try std.fmt.bufPrint(&buf, fmt, args);
+    try file.writeAll(msg);
+}
+
+/// Read a line from a file, stripping the newline.
+fn readLine(file: std.fs.File, buf: []u8) !?[]u8 {
+    var i: usize = 0;
+    while (i < buf.len) {
+        const bytes_read = file.read(buf[i .. i + 1]) catch |err| return err;
+        if (bytes_read == 0) {
+            if (i == 0) return null;
+            return buf[0..i];
+        }
+        if (buf[i] == '\n') {
+            return buf[0..i];
+        }
+        i += 1;
+    }
+    return buf[0..i];
+}
+
 pub fn main() !void {
     const args = parseArgs();
 
@@ -159,7 +187,7 @@ fn parseArgs() Args {
 }
 
 fn printHelp() void {
-    const stderr = std.io.getStdErr().writer();
+    const stderr = std.fs.File.stderr();
     const help =
         \\Matching Engine Zig Client
         \\
@@ -215,7 +243,7 @@ fn printHelp() void {
         \\  quit / exit
         \\
     ;
-    stderr.print("{s}", .{help}) catch {};
+    stderr.writeAll(help) catch {};
 }
 
 // ============================================================
@@ -223,14 +251,14 @@ fn printHelp() void {
 // ============================================================
 
 fn runInteractive(args: Args) !void {
-    const stderr = std.io.getStdErr().writer();
-    const stdin = std.io.getStdIn().reader();
+    const stderr = std.fs.File.stderr();
+    const stdin = std.fs.File.stdin();
 
     // Show what we're trying
     if (args.transport == .auto) {
-        try stderr.print("Auto-detecting server at {s}:{d}...\n", .{ args.host, args.port });
+        try print(stderr, "Auto-detecting server at {s}:{d}...\n", .{ args.host, args.port });
     } else {
-        try stderr.print("Connecting to {s}:{d}...\n", .{ args.host, args.port });
+        try print(stderr, "Connecting to {s}:{d}...\n", .{ args.host, args.port });
     }
 
     var client = EngineClient.init(.{
@@ -239,7 +267,7 @@ fn runInteractive(args: Args) !void {
         .transport = args.transport,
         .protocol = args.protocol,
     }) catch |err| {
-        try stderr.print("Connection failed: {s}\n", .{@errorName(err)});
+        try print(stderr, "Connection failed: {s}\n", .{@errorName(err)});
         return;
     };
     defer client.deinit();
@@ -256,7 +284,7 @@ fn runInteractive(args: Args) !void {
         .auto => "auto",
     };
 
-    try stderr.print("Connected to {s}:{d} ({s}/{s})\n", .{
+    try print(stderr, "Connected to {s}:{d} ({s}/{s})\n", .{
         args.host,
         args.port,
         transport_str,
@@ -264,26 +292,26 @@ fn runInteractive(args: Args) !void {
     });
 
     if (args.transport == .auto or args.protocol == .auto) {
-        try stderr.print("(auto-detected)\n", .{});
+        try stderr.writeAll("(auto-detected)\n");
     }
-    try stderr.print("\n", .{});
+    try stderr.writeAll("\n");
 
-    try stderr.print("=== Interactive Mode ===\n", .{});
-    try stderr.print("Commands:\n", .{});
-    try stderr.print("  buy SYMBOL PRICE QTY [ORDER_ID]\n", .{});
-    try stderr.print("  sell SYMBOL PRICE QTY [ORDER_ID]\n", .{});
-    try stderr.print("  cancel SYMBOL ORDER_ID\n", .{});
-    try stderr.print("  flush\n", .{});
-    try stderr.print("  quit\n\n", .{});
+    try stderr.writeAll("=== Interactive Mode ===\n");
+    try stderr.writeAll("Commands:\n");
+    try stderr.writeAll("  buy SYMBOL PRICE QTY [ORDER_ID]\n");
+    try stderr.writeAll("  sell SYMBOL PRICE QTY [ORDER_ID]\n");
+    try stderr.writeAll("  cancel SYMBOL ORDER_ID\n");
+    try stderr.writeAll("  flush\n");
+    try stderr.writeAll("  quit\n\n");
 
     var line_buf: [1024]u8 = undefined;
     var order_id: u32 = 1;
 
     while (true) {
-        try stderr.print("> ", .{});
+        try stderr.writeAll("> ");
 
-        const line = stdin.readUntilDelimiterOrEof(&line_buf, '\n') catch |err| {
-            try stderr.print("Read error: {s}\n", .{@errorName(err)});
+        const line = readLine(stdin, &line_buf) catch |err| {
+            try print(stderr, "Read error: {s}\n", .{@errorName(err)});
             break;
         } orelse break;
 
@@ -295,61 +323,61 @@ fn runInteractive(args: Args) !void {
         if (std.mem.eql(u8, trimmed, "quit") or std.mem.eql(u8, trimmed, "exit")) {
             break;
         } else if (std.mem.eql(u8, trimmed, "flush") or std.mem.eql(u8, trimmed, "F")) {
-            try stderr.print("→ FLUSH\n", .{});
+            try stderr.writeAll("→ FLUSH\n");
             client.sendFlush() catch |err| {
-                try stderr.print("Send error: {s}\n", .{@errorName(err)});
+                try print(stderr, "Send error: {s}\n", .{@errorName(err)});
                 continue;
             };
             try recvAndPrintResponses(&client, stderr);
         } else if (std.mem.startsWith(u8, trimmed, "buy ")) {
             if (parseBuySell(trimmed[4..], &order_id)) |parsed| {
-                try stderr.print("→ BUY {s} {d}@{d} (order {d})\n", .{
+                try print(stderr, "→ BUY {s} {d}@{d} (order {d})\n", .{
                     parsed.symbol,
                     parsed.qty,
                     parsed.price,
                     parsed.order_id,
                 });
                 client.sendNewOrder(1, parsed.symbol, parsed.price, parsed.qty, .buy, parsed.order_id) catch |err| {
-                    try stderr.print("Send error: {s}\n", .{@errorName(err)});
+                    try print(stderr, "Send error: {s}\n", .{@errorName(err)});
                     continue;
                 };
                 try recvAndPrintResponses(&client, stderr);
             } else {
-                try stderr.print("Usage: buy SYMBOL PRICE QTY [ORDER_ID]\n", .{});
+                try stderr.writeAll("Usage: buy SYMBOL PRICE QTY [ORDER_ID]\n");
             }
         } else if (std.mem.startsWith(u8, trimmed, "sell ")) {
             if (parseBuySell(trimmed[5..], &order_id)) |parsed| {
-                try stderr.print("→ SELL {s} {d}@{d} (order {d})\n", .{
+                try print(stderr, "→ SELL {s} {d}@{d} (order {d})\n", .{
                     parsed.symbol,
                     parsed.qty,
                     parsed.price,
                     parsed.order_id,
                 });
                 client.sendNewOrder(1, parsed.symbol, parsed.price, parsed.qty, .sell, parsed.order_id) catch |err| {
-                    try stderr.print("Send error: {s}\n", .{@errorName(err)});
+                    try print(stderr, "Send error: {s}\n", .{@errorName(err)});
                     continue;
                 };
                 try recvAndPrintResponses(&client, stderr);
             } else {
-                try stderr.print("Usage: sell SYMBOL PRICE QTY [ORDER_ID]\n", .{});
+                try stderr.writeAll("Usage: sell SYMBOL PRICE QTY [ORDER_ID]\n");
             }
         } else if (std.mem.startsWith(u8, trimmed, "cancel ")) {
             if (parseCancel(trimmed[7..])) |parsed| {
-                try stderr.print("→ CANCEL {s} order {d}\n", .{ parsed.symbol, parsed.order_id });
+                try print(stderr, "→ CANCEL {s} order {d}\n", .{ parsed.symbol, parsed.order_id });
                 client.sendCancel(1, parsed.symbol, parsed.order_id) catch |err| {
-                    try stderr.print("Send error: {s}\n", .{@errorName(err)});
+                    try print(stderr, "Send error: {s}\n", .{@errorName(err)});
                     continue;
                 };
                 try recvAndPrintResponses(&client, stderr);
             } else {
-                try stderr.print("Usage: cancel SYMBOL ORDER_ID\n", .{});
+                try stderr.writeAll("Usage: cancel SYMBOL ORDER_ID\n");
             }
         } else {
-            try stderr.print("Unknown command. Type 'quit' to exit.\n", .{});
+            try stderr.writeAll("Unknown command. Type 'quit' to exit.\n");
         }
     }
 
-    try stderr.print("\n=== Disconnecting ===\n", .{});
+    try stderr.writeAll("\n=== Disconnecting ===\n");
 }
 
 const ParsedOrder = struct {
@@ -408,7 +436,7 @@ fn parseCancel(input: []const u8) ?ParsedCancel {
     };
 }
 
-fn recvAndPrintResponses(client: *EngineClient, stderr: anytype) !void {
+fn recvAndPrintResponses(client: *EngineClient, stderr: std.fs.File) !void {
     const proto = client.getProtocol();
 
     // Handle TCP responses
@@ -417,13 +445,13 @@ fn recvAndPrintResponses(client: *EngineClient, stderr: anytype) !void {
         const max_responses: u32 = 20;
 
         // Give the server a moment to send all responses
-        std.time.sleep(50 * std.time.ns_per_ms);
+        std.Thread.sleep(50 * 1_000_000);
 
         while (response_count < max_responses) {
             const raw_data = tcp_client.recv() catch |err| {
                 if (response_count > 0) break;
                 if (err == error.Timeout) {
-                    try stderr.print("[No response - timeout]\n", .{});
+                    try stderr.writeAll("[No response - timeout]\n");
                 }
                 break;
             };
@@ -438,7 +466,7 @@ fn recvAndPrintResponses(client: *EngineClient, stderr: anytype) !void {
         const max_responses: u32 = 20;
 
         // Give server time to respond
-        std.time.sleep(50 * std.time.ns_per_ms);
+        std.Thread.sleep(50 * 1_000_000);
 
         while (response_count < max_responses) {
             const raw_data = udp_client.recv() catch {
@@ -451,28 +479,28 @@ fn recvAndPrintResponses(client: *EngineClient, stderr: anytype) !void {
         }
 
         if (response_count == 0) {
-            try stderr.print("[No UDP response received]\n", .{});
+            try stderr.writeAll("[No UDP response received]\n");
         }
     }
 }
 
-fn printRawResponse(raw_data: []const u8, proto: Protocol, stderr: anytype) !void {
+fn printRawResponse(raw_data: []const u8, proto: Protocol, stderr: std.fs.File) !void {
     if (proto == .binary) {
         if (binary.isBinaryProtocol(raw_data)) {
             const msg = binary.decodeOutput(raw_data) catch |err| {
-                try stderr.print("[Parse error: {s}]\n", .{@errorName(err)});
+                try print(stderr, "[Parse error: {s}]\n", .{@errorName(err)});
                 return;
             };
             try printResponse(msg, stderr);
         } else {
-            try stderr.print("[RECV] {s}\n", .{raw_data});
+            try print(stderr, "[RECV] {s}\n", .{raw_data});
         }
     } else {
         // CSV protocol (or auto) - parse or just print raw
         const msg = csv.parseOutput(raw_data) catch {
-            try stderr.print("[RECV] {s}", .{raw_data});
+            try print(stderr, "[RECV] {s}", .{raw_data});
             if (raw_data.len > 0 and raw_data[raw_data.len - 1] != '\n') {
-                try stderr.print("\n", .{});
+                try stderr.writeAll("\n");
             }
             return;
         };
@@ -480,26 +508,26 @@ fn printRawResponse(raw_data: []const u8, proto: Protocol, stderr: anytype) !voi
     }
 }
 
-fn printResponse(msg: OutputMessage, stderr: anytype) !void {
+fn printResponse(msg: OutputMessage, stderr: std.fs.File) !void {
     const symbol = msg.symbol[0..msg.symbol_len];
 
     switch (msg.msg_type) {
         .ack => {
-            try stderr.print("[RECV] A, {s}, {d}, {d}\n", .{
+            try print(stderr, "[RECV] A, {s}, {d}, {d}\n", .{
                 symbol,
                 msg.user_id,
                 msg.order_id,
             });
         },
         .cancel_ack => {
-            try stderr.print("[RECV] C, {s}, {d}, {d}\n", .{
+            try print(stderr, "[RECV] C, {s}, {d}, {d}\n", .{
                 symbol,
                 msg.user_id,
                 msg.order_id,
             });
         },
         .trade => {
-            try stderr.print("[RECV] T, {s}, {d}, {d}, {d}, {d}, {d}.{d:0>2}, {d}\n", .{
+            try print(stderr, "[RECV] T, {s}, {d}, {d}, {d}, {d}, {d}.{d:0>2}, {d}\n", .{
                 symbol,
                 msg.buy_user_id,
                 msg.buy_order_id,
@@ -511,7 +539,7 @@ fn printResponse(msg: OutputMessage, stderr: anytype) !void {
             });
         },
         .reject => {
-            try stderr.print("[RECV] R, {s}, {d}, {d}, {d}\n", .{
+            try print(stderr, "[RECV] R, {s}, {d}, {d}, {d}\n", .{
                 symbol,
                 msg.user_id,
                 msg.order_id,
@@ -521,12 +549,12 @@ fn printResponse(msg: OutputMessage, stderr: anytype) !void {
         .top_of_book => {
             const side_char: u8 = if (msg.side) |s| @intFromEnum(s) else '-';
             if (msg.price == 0 and msg.quantity == 0) {
-                try stderr.print("[RECV] B, {s}, {c}, -, -\n", .{
+                try print(stderr, "[RECV] B, {s}, {c}, -, -\n", .{
                     symbol,
                     side_char,
                 });
             } else {
-                try stderr.print("[RECV] B, {s}, {c}, -, -\n", .{
+                try print(stderr, "[RECV] B, {s}, {c}, -, -\n", .{
                     symbol,
                     side_char,
                 });
@@ -540,13 +568,13 @@ fn printResponse(msg: OutputMessage, stderr: anytype) !void {
 // ============================================================
 
 fn runScenario(args: Args) !void {
-    const stderr = std.io.getStdErr().writer();
+    const stderr = std.fs.File.stderr();
 
     // Show what we're trying
     if (args.transport == .auto) {
-        try stderr.print("Auto-detecting server at {s}:{d}...\n", .{ args.host, args.port });
+        try print(stderr, "Auto-detecting server at {s}:{d}...\n", .{ args.host, args.port });
     } else {
-        try stderr.print("Connecting to {s}:{d}...\n", .{ args.host, args.port });
+        try print(stderr, "Connecting to {s}:{d}...\n", .{ args.host, args.port });
     }
 
     var client = EngineClient.init(.{
@@ -555,7 +583,7 @@ fn runScenario(args: Args) !void {
         .transport = args.transport,
         .protocol = args.protocol,
     }) catch |err| {
-        try stderr.print("Connection failed: {s}\n", .{@errorName(err)});
+        try print(stderr, "Connection failed: {s}\n", .{@errorName(err)});
         return;
     };
     defer client.deinit();
@@ -572,22 +600,22 @@ fn runScenario(args: Args) !void {
         .auto => "auto",
     };
 
-    try stderr.print("Connected ({s}/{s})", .{ transport_str, protocol_str });
+    try print(stderr, "Connected ({s}/{s})", .{ transport_str, protocol_str });
     if (args.transport == .auto or args.protocol == .auto) {
-        try stderr.print(" [auto-detected]", .{});
+        try stderr.writeAll(" [auto-detected]");
     }
-    try stderr.print("\n\n", .{});
+    try stderr.writeAll("\n\n");
 
     scenarios.run(&client, args.scenario, stderr) catch |err| {
         if (err == error.UnknownScenario) {
-            try stderr.print("\nUnknown scenario: {d}\n", .{args.scenario});
+            try print(stderr, "\nUnknown scenario: {d}\n", .{args.scenario});
         } else {
             return err;
         }
         return;
     };
 
-    try stderr.print("\n=== Disconnecting ===\n", .{});
+    try stderr.writeAll("\n=== Disconnecting ===\n");
 }
 
 // ============================================================
@@ -595,21 +623,21 @@ fn runScenario(args: Args) !void {
 // ============================================================
 
 fn runSubscribe(args: Args) !void {
-    const stderr = std.io.getStdErr().writer();
+    const stderr = std.fs.File.stderr();
 
-    try stderr.print("Joining multicast group {s}:{d}...\n", .{ args.multicast_group, args.port });
+    try print(stderr, "Joining multicast group {s}:{d}...\n", .{ args.multicast_group, args.port });
 
     var subscriber = MulticastSubscriber.join(args.multicast_group, args.port) catch |err| {
-        try stderr.print("Failed to join multicast: {s}\n", .{@errorName(err)});
+        try print(stderr, "Failed to join multicast: {s}\n", .{@errorName(err)});
         return;
     };
     defer subscriber.close();
 
-    try stderr.print("Subscribed. Waiting for market data (Ctrl+C to stop)...\n\n", .{});
+    try stderr.writeAll("Subscribed. Waiting for market data (Ctrl+C to stop)...\n\n");
 
     while (true) {
         const msg = subscriber.recvMessage() catch |err| {
-            try stderr.print("Receive error: {s}\n", .{@errorName(err)});
+            try print(stderr, "Receive error: {s}\n", .{@errorName(err)});
             continue;
         };
 
@@ -622,9 +650,9 @@ fn runSubscribe(args: Args) !void {
 // ============================================================
 
 fn runBenchmark(args: Args) !void {
-    const stderr = std.io.getStdErr().writer();
+    const stderr = std.fs.File.stderr();
 
-    try stderr.print("Connecting to {s}:{d}...\n", .{ args.host, args.port });
+    try print(stderr, "Connecting to {s}:{d}...\n", .{ args.host, args.port });
 
     var client = EngineClient.init(.{
         .host = args.host,
@@ -632,7 +660,7 @@ fn runBenchmark(args: Args) !void {
         .transport = args.transport,
         .protocol = args.protocol,
     }) catch |err| {
-        try stderr.print("Connection failed: {s}\n", .{@errorName(err)});
+        try print(stderr, "Connection failed: {s}\n", .{@errorName(err)});
         return;
     };
     defer client.deinit();
@@ -640,7 +668,7 @@ fn runBenchmark(args: Args) !void {
     const iterations: u32 = 10000;
     var tracker = timestamp.LatencyTracker.init();
 
-    try stderr.print("Running {d} iterations...\n", .{iterations});
+    try print(stderr, "Running {d} iterations...\n", .{iterations});
 
     for (0..iterations) |i| {
         const start = timestamp.now();
@@ -656,9 +684,9 @@ fn runBenchmark(args: Args) !void {
 
     var buf: [256]u8 = undefined;
     const stats = tracker.format(&buf);
-    try stderr.print("\nResults: {s}\n", .{stats});
+    try print(stderr, "\nResults: {s}\n", .{stats});
     const throughput: u64 = if (tracker.sum > 0) @as(u64, iterations) * 1_000_000_000 / tracker.sum else 0;
-    try stderr.print("Throughput: {d} msg/sec\n", .{throughput});
+    try print(stderr, "Throughput: {d} msg/sec\n", .{throughput});
 }
 
 // ============================================================

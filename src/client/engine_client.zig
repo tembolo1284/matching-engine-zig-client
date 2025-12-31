@@ -32,7 +32,7 @@ const udp = @import("../transport/udp.zig");
 // ============================================================
 
 /// Maximum time to wait for protocol detection response (ms)
-const PROTOCOL_DETECT_TIMEOUT_MS: u32 = 200;
+const PROTOCOL_DETECT_TIMEOUT_MS: u64 = 200;
 
 /// Maximum drain iterations during protocol detection
 const MAX_DRAIN_ITERATIONS: u32 = 20;
@@ -47,6 +47,9 @@ const PROBE_ORDER_ID_CSV: u32 = 999999999;
 
 /// Probe symbol (starts with Z for processor 1)
 const PROBE_SYMBOL = "ZZPROBE";
+
+/// Nanoseconds per millisecond
+const NS_PER_MS: u64 = 1_000_000;
 
 // ============================================================
 // Enums
@@ -292,7 +295,7 @@ pub const EngineClient = struct {
     /// Send binary probe and check response.
     /// Uses PROBE_ORDER_ID_BINARY (different from CSV probe).
     /// NOTE: TcpClient handles framing internally - do NOT add framing here.
-    /// 
+    ///
     /// Detection logic: If server responds to our binary message with ANY valid
     /// response (binary ACK or CSV ACK), it means the server understood binary.
     /// We use binary for all future communication.
@@ -300,22 +303,22 @@ pub const EngineClient = struct {
         // Send cancel for non-existent order - server rejects but creates NO state!
         const probe_cancel = types.BinaryCancel.init(1, PROBE_SYMBOL, PROBE_ORDER_ID_BINARY);
         self.tcp_client.?.send(probe_cancel.asBytes()) catch return .csv;
-    
-        std.time.sleep(PROTOCOL_DETECT_TIMEOUT_MS * std.time.ns_per_ms);
-    
+
+        std.Thread.sleep(PROTOCOL_DETECT_TIMEOUT_MS * NS_PER_MS);
+
         const response = self.tcp_client.?.recv() catch return .csv;
-    
+
         // Any response means server understood our message
         if (response.len > 0) {
             const is_binary = binary.isBinaryProtocol(response);
             const is_csv_response = (response[0] == 'R' or response[0] == 'X' or response[0] == 'C');
-        
+
             if (is_binary or is_csv_response) {
                 self.drainResponses();
                 return .binary;
             }
         }
-    
+
         return .csv;
     }
 
@@ -339,7 +342,7 @@ pub const EngineClient = struct {
         };
 
         // Wait for response
-        std.time.sleep(PROTOCOL_DETECT_TIMEOUT_MS * std.time.ns_per_ms);
+        std.Thread.sleep(PROTOCOL_DETECT_TIMEOUT_MS * NS_PER_MS);
 
         // Try to receive response
         const response = self.tcp_client.?.recv() catch |err| {
@@ -366,7 +369,7 @@ pub const EngineClient = struct {
         if (self.tcp_client == null) return;
 
         // Wait for responses to arrive
-        std.time.sleep(100 * std.time.ns_per_ms);
+        std.Thread.sleep(100 * NS_PER_MS);
 
         // Bounded drain loop
         var drain_count: u32 = 0;

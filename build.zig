@@ -4,11 +4,15 @@ pub fn build(b: *std.Build) void {
     const target = b.standardTargetOptions(.{});
     const optimize = b.standardOptimizeOption(.{});
 
-    const exe = b.addExecutable(.{
-        .name = "me-client",
+    const exe_mod = b.createModule(.{
         .root_source_file = b.path("src/main.zig"),
         .target = target,
         .optimize = optimize,
+    });
+
+    const exe = b.addExecutable(.{
+        .name = "me-client",
+        .root_module = exe_mod,
     });
     exe.linkLibC();
     b.installArtifact(exe);
@@ -20,10 +24,14 @@ pub fn build(b: *std.Build) void {
     const run_step = b.step("run", "Run the matching engine client");
     run_step.dependOn(&run_cmd.step);
 
-    const unit_tests = b.addTest(.{
+    const test_mod = b.createModule(.{
         .root_source_file = b.path("src/main.zig"),
         .target = target,
         .optimize = optimize,
+    });
+
+    const unit_tests = b.addTest(.{
+        .root_module = test_mod,
     });
     unit_tests.linkLibC();
 
@@ -31,11 +39,15 @@ pub fn build(b: *std.Build) void {
     const test_step = b.step("test", "Run unit tests");
     test_step.dependOn(&run_unit_tests.step);
 
-    const release_exe = b.addExecutable(.{
-        .name = "me-client",
+    const release_mod = b.createModule(.{
         .root_source_file = b.path("src/main.zig"),
         .target = target,
         .optimize = .ReleaseFast,
+    });
+
+    const release_exe = b.addExecutable(.{
+        .name = "me-client",
+        .root_module = release_mod,
     });
     release_exe.linkLibC();
 
