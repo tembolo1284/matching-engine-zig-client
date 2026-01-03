@@ -3,7 +3,7 @@
 //! Pre-built test scenarios for validating the matching engine client.
 //! Supports both interactive testing and automated stress tests.
 //!
-//! HIGH-PERFORMANCE MODE: Uses non-blocking I/O with aggressive batching.
+//! HIGH-PERFORMANCE MODE: Uses aggressive pipelining for maximum throughput.
 const std = @import("std");
 const EngineClient = @import("client/engine_client.zig").EngineClient;
 const Protocol = @import("client/engine_client.zig").Protocol;
@@ -114,15 +114,15 @@ pub fn run(client: *EngineClient, scenario: u8, stderr: std.fs.File) !void {
         10 => try runStressTest(client, stderr, 1_000),
         11 => try runStressTest(client, stderr, 10_000),
         12 => try runStressTest(client, stderr, 100_000),
-        20 => try runMatchingStressFast(client, stderr, 1_000),
-        21 => try runMatchingStressFast(client, stderr, 10_000),
-        22 => try runMatchingStressFast(client, stderr, 100_000),
-        23 => try runMatchingStressFast(client, stderr, 250_000),
-        24 => try runMatchingStressFast(client, stderr, 500_000),
-        25 => try runMatchingStressFast(client, stderr, 250_000_000),
-        30 => try runDualProcessorStressFast(client, stderr, 500_000),
-        31 => try runDualProcessorStressFast(client, stderr, 1_000_000),
-        32 => try runDualProcessorStressFast(client, stderr, 100_000_000),
+        20 => try runMatchingStressPipelined(client, stderr, 1_000),
+        21 => try runMatchingStressPipelined(client, stderr, 10_000),
+        22 => try runMatchingStressPipelined(client, stderr, 100_000),
+        23 => try runMatchingStressPipelined(client, stderr, 250_000),
+        24 => try runMatchingStressPipelined(client, stderr, 500_000),
+        25 => try runMatchingStressPipelined(client, stderr, 250_000_000),
+        30 => try runDualProcessorStressPipelined(client, stderr, 500_000),
+        31 => try runDualProcessorStressPipelined(client, stderr, 1_000_000),
+        32 => try runDualProcessorStressPipelined(client, stderr, 100_000_000),
         else => {
             try printAvailableScenarios(stderr);
             return error.UnknownScenario;
@@ -155,20 +155,17 @@ fn runScenario1(client: *EngineClient, stderr: std.fs.File) !void {
     try print(stderr, "=== Scenario 1: Simple Orders ===\n\n", .{});
     const start_time = timestamp.now();
 
-    // Order 1: Buy
     try print(stderr, "[SEND] N, IBM, 1, 1, 100, 50, B (New Order: BUY 50 IBM @ 100)\n", .{});
     try client.sendNewOrder(1, "IBM", 100, 50, .buy, 1);
     try recvAndPrintResponsesFast(client, stderr, 5);
 
-    // Order 2: Sell (different price, won't match)
     try print(stderr, "[SEND] N, IBM, 1, 2, 105, 50, S (New Order: SELL 50 IBM @ 105)\n", .{});
     try client.sendNewOrder(1, "IBM", 105, 50, .sell, 2);
     try recvAndPrintResponsesFast(client, stderr, 5);
 
-    // Flush
     try print(stderr, "\n[SEND] F (Flush - cancel all orders)\n", .{});
     try client.sendFlush();
-    try recvAndPrintResponsesFast(client, stderr, 10);
+    try recvAndPrintResponsesFast(client, stderr, 20);
 
     const elapsed = timestamp.now() - start_time;
     try print(stderr, "\n", .{});
@@ -179,20 +176,17 @@ fn runScenario2(client: *EngineClient, stderr: std.fs.File) !void {
     try print(stderr, "=== Scenario 2: Matching Trade ===\n\n", .{});
     const start_time = timestamp.now();
 
-    // Order 1: Buy
     try print(stderr, "[SEND] N, IBM, 1, 1, 100, 50, B (New Order: BUY 50 IBM @ 100)\n", .{});
     try client.sendNewOrder(1, "IBM", 100, 50, .buy, 1);
     try recvAndPrintResponsesFast(client, stderr, 5);
 
-    // Order 2: Sell at same price - should match!
     try print(stderr, "[SEND] N, IBM, 1, 2, 100, 50, S (New Order: SELL 50 IBM @ 100 - SHOULD MATCH)\n", .{});
     try client.sendNewOrder(1, "IBM", 100, 50, .sell, 2);
     try recvAndPrintResponsesFast(client, stderr, 5);
 
-    // Flush
     try print(stderr, "\n[SEND] F (Flush - cancel all orders)\n", .{});
     try client.sendFlush();
-    try recvAndPrintResponsesFast(client, stderr, 10);
+    try recvAndPrintResponsesFast(client, stderr, 20);
 
     const elapsed = timestamp.now() - start_time;
     try print(stderr, "\n", .{});
@@ -203,20 +197,17 @@ fn runScenario3(client: *EngineClient, stderr: std.fs.File) !void {
     try print(stderr, "=== Scenario 3: Cancel Order ===\n\n", .{});
     const start_time = timestamp.now();
 
-    // Order 1: Buy
     try print(stderr, "[SEND] N, IBM, 1, 1, 100, 50, B (New Order: BUY 50 IBM @ 100)\n", .{});
     try client.sendNewOrder(1, "IBM", 100, 50, .buy, 1);
     try recvAndPrintResponsesFast(client, stderr, 5);
 
-    // Cancel order 1
     try print(stderr, "[SEND] C, IBM, 1, 1 (Cancel order 1)\n", .{});
     try client.sendCancel(1, "IBM", 1);
     try recvAndPrintResponsesFast(client, stderr, 5);
 
-    // Flush
     try print(stderr, "\n[SEND] F (Flush - cancel all orders)\n", .{});
     try client.sendFlush();
-    try recvAndPrintResponsesFast(client, stderr, 10);
+    try recvAndPrintResponsesFast(client, stderr, 20);
 
     const elapsed = timestamp.now() - start_time;
     try print(stderr, "\n", .{});
@@ -224,7 +215,7 @@ fn runScenario3(client: *EngineClient, stderr: std.fs.File) !void {
 }
 
 // ============================================================
-// Unmatched Stress Test (single-threaded, simpler)
+// Unmatched Stress Test
 // ============================================================
 
 fn runStressTest(client: *EngineClient, stderr: std.fs.File, count: u32) !void {
@@ -233,10 +224,10 @@ fn runStressTest(client: *EngineClient, stderr: std.fs.File, count: u32) !void {
 
     try client.sendFlush();
     std.Thread.sleep(200 * NS_PER_MS);
-    _ = try drainResponsesFast(client, 500);
+    _ = try drainAllAvailable(client);
 
-    const progress_interval = count / 10;
     var running_stats = ResponseStats{};
+    const progress_interval = count / 4; // Only 25%, 50%, 75%, 100%
 
     const start_time = timestamp.now();
 
@@ -245,30 +236,41 @@ fn runStressTest(client: *EngineClient, stderr: std.fs.File, count: u32) !void {
         const order_id: u32 = @intCast(i + 1);
         try client.sendNewOrder(1, "IBM", price, 10, .buy, order_id);
 
-        if (!quiet and progress_interval > 0 and i > 0 and i % progress_interval == 0) {
-            const batch_stats = try drainBatchFast(client, 10);
+        // Quick drain every 1000 orders (don't wait, just grab what's ready)
+        if (i > 0 and i % 1000 == 0) {
+            const batch_stats = try drainAllAvailable(client);
             running_stats.add(batch_stats);
+        }
+
+        // Progress at 25%, 50%, 75%
+        if (!quiet and progress_interval > 0 and i > 0 and i % progress_interval == 0) {
             const pct = (i * 100) / count;
-            try print(stderr, "  {d}% ({d} orders sent, {d} responses)\n", .{ pct, i, running_stats.total() });
+            const elapsed_ms = (timestamp.now() - start_time) / NS_PER_MS;
+            try print(stderr, "  {d}% | {d} sent | {d} recv'd | {d} ms\n", .{
+                pct, i, running_stats.total(), elapsed_ms,
+            });
         }
     }
 
-    const end_time = timestamp.now();
-    const total_time = if (end_time >= start_time) end_time - start_time else 0;
+    const send_end_time = timestamp.now();
+    const send_time = send_end_time - start_time;
 
-    try print(stderr, "\n=== Send Complete ===\n", .{});
+    try print(stderr, "\n=== Send Phase Complete ===\n", .{});
     try print(stderr, "Orders sent:     {d}\n", .{count});
-    try printTime(stderr, "Total time:      ", total_time);
-
-    if (total_time > 0) {
-        const throughput: u64 = @as(u64, count) * NS_PER_SEC / total_time;
-        try printThroughput(stderr, "Throughput:  ", throughput);
+    try printTime(stderr, "Send time:       ", send_time);
+    if (send_time > 0) {
+        const send_rate: u64 = @as(u64, count) * NS_PER_SEC / send_time;
+        try printThroughput(stderr, "Send rate:       ", send_rate);
     }
 
+    // Final drain - be patient
     try print(stderr, "\nDraining responses...\n", .{});
-    std.Thread.sleep(500 * NS_PER_MS);
-    const final_stats = try drainResponsesFast(client, 30_000);
+    const final_stats = try drainWithPatience(client, count * 2, 5000); // Expect ~2 msgs per order
     running_stats.add(final_stats);
+
+    const total_time = timestamp.now() - start_time;
+    try print(stderr, "\n=== Total Time ===\n", .{});
+    try printTime(stderr, "Total:           ", total_time);
 
     try running_stats.printValidation(count, 0, stderr);
 
@@ -278,12 +280,11 @@ fn runStressTest(client: *EngineClient, stderr: std.fs.File, count: u32) !void {
 }
 
 // ============================================================
-// High-Performance Matching Stress Test
-// Uses balanced send/recv to prevent buffer overflow
+// PIPELINED Matching Stress Test
+// Send as fast as possible, drain opportunistically, final drain at end
 // ============================================================
 
-fn runMatchingStressFast(client: *EngineClient, stderr: std.fs.File, trades: u64) !void {
-    const quiet = global_config.quiet;
+fn runMatchingStressPipelined(client: *EngineClient, stderr: std.fs.File, trades: u64) !void {
     const orders = trades * 2;
 
     if (trades >= 100_000_000) {
@@ -294,7 +295,7 @@ fn runMatchingStressFast(client: *EngineClient, stderr: std.fs.File, trades: u64
         try stderr.writeAll("╚══════════════════════════════════════════════════════════╝\n");
         try stderr.writeAll("\n");
     } else {
-        try print(stderr, "=== High-Performance Matching Stress: {d} Trades ===\n\n", .{trades});
+        try print(stderr, "=== Pipelined Matching Stress: {d} Trades ===\n\n", .{trades});
     }
 
     if (trades >= 1_000_000) {
@@ -307,29 +308,24 @@ fn runMatchingStressFast(client: *EngineClient, stderr: std.fs.File, trades: u64
 
     try client.sendFlush();
     std.Thread.sleep(200 * NS_PER_MS);
-    _ = try drainResponsesFast(client, 500);
+    _ = try drainAllAvailable(client);
 
-    // BALANCED MODE:
-    // - Moderate batch size to prevent overwhelming server
-    // - After sending batch, drain ALL expected responses before continuing
-    // - Each pair generates: 2 ACKs + 1 Trade + 2 TOB = 5 messages
-    const batch_size: u64 = 100; // Smaller batch for better flow control
-    const responses_per_pair: u64 = 5;
+    // PIPELINED MODE:
+    // - Send in large batches (1000 pairs)
+    // - After each batch, do ONE quick non-blocking drain (don't wait!)
+    // - At the end, do patient drain to collect all responses
+    const batch_size: u64 = 1000;
 
-    try print(stderr, "Balanced mode: {d} pairs/batch, drain before next batch\n", .{batch_size});
-
-    const progress_pct: u64 = if (trades >= 1_000_000) 5 else 10;
-    const progress_interval = trades / (100 / progress_pct);
+    try print(stderr, "Pipelined mode: {d} pairs/batch, non-blocking drain\n\n", .{batch_size});
 
     var send_errors: u64 = 0;
     var pairs_sent: u64 = 0;
     var running_stats = ResponseStats{};
-    var last_progress: u64 = 0;
+
+    const progress_points = [_]u64{ 25, 50, 75 };
+    var next_progress_idx: usize = 0;
 
     const start_time = timestamp.now();
-
-    const tcp_ptr = &(client.tcp_client orelse return error.NotConnected);
-    const proto = client.getProtocol();
 
     var i: u64 = 0;
     while (i < trades) : (i += 1) {
@@ -347,120 +343,67 @@ fn runMatchingStressFast(client: *EngineClient, stderr: std.fs.File, trades: u64
         };
         pairs_sent += 1;
 
-        // After each batch, drain responses with proper waiting
+        // After each batch, do ONE quick drain (non-blocking)
         if (pairs_sent % batch_size == 0) {
-            const expected_responses = batch_size * responses_per_pair;
-            var received: u64 = 0;
-            var consecutive_empty: u32 = 0;
-            const max_consecutive_empty: u32 = 20; // Allow some empty polls
-
-            // Keep draining until we have all expected responses or give up
-            while (received < expected_responses and consecutive_empty < max_consecutive_empty) {
-                // Use small timeout (5ms) to wait for data
-                const maybe_data = tcp_ptr.tryRecv(5) catch |err| {
-                    if (err == error.WouldBlock or err == error.Timeout) {
-                        consecutive_empty += 1;
-                        continue;
-                    }
-                    break;
-                };
-
-                if (maybe_data) |raw_data| {
-                    if (parseMessage(raw_data, proto)) |m| {
-                        countMessage(&running_stats, m);
-                        received += 1;
-                        consecutive_empty = 0; // Reset on success
-                    }
-                } else {
-                    consecutive_empty += 1;
-                }
-            }
+            const batch_stats = try drainAllAvailable(client);
+            running_stats.add(batch_stats);
         }
 
-        // Progress reporting
-        if (!quiet and progress_interval > 0 and i > 0 and i / progress_interval > last_progress) {
-            last_progress = i / progress_interval;
-            const pct = (i * 100) / trades;
-            const elapsed = (timestamp.now() - start_time) / 1_000_000;
-            const rate: u64 = if (elapsed > 0) pairs_sent * 1000 / elapsed else 0;
-            try print(stderr, "  {d}% | {d} pairs | {d} ms | {d} trades/sec | recv'd: {d} | errs: {d}\n", .{
-                pct, pairs_sent, elapsed, rate, running_stats.total(), send_errors,
-            });
-        }
-    }
-
-    // Handle any remaining pairs (not a full batch)
-    const remaining_pairs = pairs_sent % batch_size;
-    if (remaining_pairs > 0) {
-        const expected_responses = remaining_pairs * responses_per_pair;
-        var received: u64 = 0;
-        var consecutive_empty: u32 = 0;
-        const max_consecutive_empty: u32 = 50;
-
-        while (received < expected_responses and consecutive_empty < max_consecutive_empty) {
-            const maybe_data = tcp_ptr.tryRecv(5) catch |err| {
-                if (err == error.WouldBlock or err == error.Timeout) {
-                    consecutive_empty += 1;
-                    continue;
-                }
-                break;
-            };
-
-            if (maybe_data) |raw_data| {
-                if (parseMessage(raw_data, proto)) |m| {
-                    countMessage(&running_stats, m);
-                    received += 1;
-                    consecutive_empty = 0;
-                }
-            } else {
-                consecutive_empty += 1;
+        // Progress at 25%, 50%, 75%
+        if (next_progress_idx < progress_points.len) {
+            const target_pct = progress_points[next_progress_idx];
+            const current_pct = (i * 100) / trades;
+            if (current_pct >= target_pct) {
+                const elapsed_ms = (timestamp.now() - start_time) / NS_PER_MS;
+                const rate: u64 = if (elapsed_ms > 0) pairs_sent * 1000 / elapsed_ms else 0;
+                try print(stderr, "  {d}% | {d} pairs sent | {d} recv'd | {d} trades/sec\n", .{
+                    target_pct, pairs_sent, running_stats.total(), rate,
+                });
+                next_progress_idx += 1;
             }
         }
     }
 
-    const end_time = timestamp.now();
-    const total_time = if (end_time >= start_time) end_time - start_time else 0;
+    const send_end_time = timestamp.now();
+    const send_time = send_end_time - start_time;
     const orders_sent = pairs_sent * 2;
 
-    try print(stderr, "\n=== Complete ===\n", .{});
+    try print(stderr, "\n=== Send Phase Complete ===\n", .{});
     try print(stderr, "Trade pairs:     {d}\n", .{pairs_sent});
     try print(stderr, "Orders sent:     {d}\n", .{orders_sent});
     try print(stderr, "Send errors:     {d}\n", .{send_errors});
+    try printTime(stderr, "Send time:       ", send_time);
+
+    if (send_time > 0) {
+        const send_rate: u64 = pairs_sent * NS_PER_SEC / send_time;
+        try printThroughput(stderr, "Send rate:       ", send_rate);
+    }
+
+    // Final drain - be VERY patient
+    const expected_total = orders_sent + pairs_sent + orders_sent; // ACKs + Trades + TOB
+    const already_received = running_stats.total();
+
+    try print(stderr, "\n=== Drain Phase ===\n", .{});
+    try print(stderr, "Already recv'd:  {d}\n", .{already_received});
+    try print(stderr, "Expected total:  {d}\n", .{expected_total});
+    try print(stderr, "Remaining:       {d}\n", .{expected_total - already_received});
+
+    const drain_start = timestamp.now();
+    const final_stats = try drainWithPatience(client, expected_total - already_received, 10000);
+    running_stats.add(final_stats);
+    const drain_time = timestamp.now() - drain_start;
+
+    try print(stderr, "Drain recv'd:    {d}\n", .{final_stats.total()});
+    try printTime(stderr, "Drain time:      ", drain_time);
+
+    const total_time = timestamp.now() - start_time;
+
+    try print(stderr, "\n=== Final Results ===\n", .{});
     try printTime(stderr, "Total time:      ", total_time);
 
     if (total_time > 0) {
         const trade_rate: u64 = pairs_sent * NS_PER_SEC / total_time;
-        try print(stderr, "\n=== Throughput ===\n", .{});
-        try printThroughput(stderr, "Trades/sec:  ", trade_rate);
-    }
-
-    // Final drain for any stragglers
-    const expected_total = orders_sent + pairs_sent + orders_sent; // ACKs + Trades + TOB
-
-    if (running_stats.total() < expected_total) {
-        try print(stderr, "\nFinal drain (have {d}/{d})...\n", .{ running_stats.total(), expected_total });
-
-        var consecutive_empty: u32 = 0;
-        const max_consecutive_empty: u32 = 100;
-
-        while (running_stats.total() < expected_total and consecutive_empty < max_consecutive_empty) {
-            const maybe_data = tcp_ptr.tryRecv(10) catch |err| {
-                if (err == error.WouldBlock or err == error.Timeout) {
-                    consecutive_empty += 1;
-                    continue;
-                }
-                break;
-            };
-
-            if (maybe_data) |raw_data| {
-                if (parseMessage(raw_data, proto)) |m| {
-                    countMessage(&running_stats, m);
-                    consecutive_empty = 0;
-                }
-            } else {
-                consecutive_empty += 1;
-            }
-        }
+        try printThroughput(stderr, "Trades/sec:      ", trade_rate);
     }
 
     try running_stats.printValidation(orders_sent, pairs_sent, stderr);
@@ -477,11 +420,10 @@ fn runMatchingStressFast(client: *EngineClient, stderr: std.fs.File, trades: u64
 }
 
 // ============================================================
-// High-Performance Dual-Processor Stress Test
+// PIPELINED Dual-Processor Stress Test
 // ============================================================
 
-fn runDualProcessorStressFast(client: *EngineClient, stderr: std.fs.File, trades: u64) !void {
-    const quiet = global_config.quiet;
+fn runDualProcessorStressPipelined(client: *EngineClient, stderr: std.fs.File, trades: u64) !void {
     const orders = trades * 2;
     const trades_per_proc = trades / 2;
 
@@ -495,7 +437,7 @@ fn runDualProcessorStressFast(client: *EngineClient, stderr: std.fs.File, trades
         try stderr.writeAll("╚══════════════════════════════════════════════════════════╝\n");
         try stderr.writeAll("\n");
     } else {
-        try print(stderr, "=== High-Performance Dual-Processor Stress: {d} Trades ===\n\n", .{trades});
+        try print(stderr, "=== Pipelined Dual-Processor Stress: {d} Trades ===\n\n", .{trades});
     }
 
     if (trades >= 1_000_000) {
@@ -508,28 +450,21 @@ fn runDualProcessorStressFast(client: *EngineClient, stderr: std.fs.File, trades
 
     try client.sendFlush();
     std.Thread.sleep(200 * NS_PER_MS);
-    _ = try drainResponsesFast(client, 500);
+    _ = try drainAllAvailable(client);
 
-    // BALANCED MODE
-    const batch_size: u64 = 100;
-    const responses_per_pair: u64 = 5;
-
-    try print(stderr, "Balanced mode: {d} pairs/batch, drain before next batch\n", .{batch_size});
-
-    const progress_pct: u64 = if (trades >= 1_000_000) 5 else 10;
-    const progress_interval = trades / (100 / progress_pct);
-
+    const batch_size: u64 = 1000;
     const symbols = [_][]const u8{ "IBM", "NVDA" };
+
+    try print(stderr, "Pipelined mode: {d} pairs/batch, non-blocking drain\n\n", .{batch_size});
 
     var send_errors: u64 = 0;
     var pairs_sent: u64 = 0;
     var running_stats = ResponseStats{};
-    var last_progress: u64 = 0;
+
+    const progress_points = [_]u64{ 25, 50, 75 };
+    var next_progress_idx: usize = 0;
 
     const start_time = timestamp.now();
-
-    const tcp_ptr = &(client.tcp_client orelse return error.NotConnected);
-    const proto = client.getProtocol();
 
     var i: u64 = 0;
     while (i < trades) : (i += 1) {
@@ -548,117 +483,64 @@ fn runDualProcessorStressFast(client: *EngineClient, stderr: std.fs.File, trades
         };
         pairs_sent += 1;
 
-        // After each batch, drain responses with proper waiting
         if (pairs_sent % batch_size == 0) {
-            const expected_responses = batch_size * responses_per_pair;
-            var received: u64 = 0;
-            var consecutive_empty: u32 = 0;
-            const max_consecutive_empty: u32 = 20;
-
-            while (received < expected_responses and consecutive_empty < max_consecutive_empty) {
-                const maybe_data = tcp_ptr.tryRecv(5) catch |err| {
-                    if (err == error.WouldBlock or err == error.Timeout) {
-                        consecutive_empty += 1;
-                        continue;
-                    }
-                    break;
-                };
-
-                if (maybe_data) |raw_data| {
-                    if (parseMessage(raw_data, proto)) |m| {
-                        countMessage(&running_stats, m);
-                        received += 1;
-                        consecutive_empty = 0;
-                    }
-                } else {
-                    consecutive_empty += 1;
-                }
-            }
+            const batch_stats = try drainAllAvailable(client);
+            running_stats.add(batch_stats);
         }
 
-        if (!quiet and progress_interval > 0 and i > 0 and i / progress_interval > last_progress) {
-            last_progress = i / progress_interval;
-            const pct = (i * 100) / trades;
-            const elapsed = (timestamp.now() - start_time) / 1_000_000;
-            const rate: u64 = if (elapsed > 0) pairs_sent * 1000 / elapsed else 0;
-            try print(stderr, "  {d}% | {d} pairs | {d} ms | {d} trades/sec | recv'd: {d} | errs: {d}\n", .{
-                pct, pairs_sent, elapsed, rate, running_stats.total(), send_errors,
-            });
-        }
-    }
-
-    // Handle remaining pairs
-    const remaining_pairs = pairs_sent % batch_size;
-    if (remaining_pairs > 0) {
-        const expected_responses = remaining_pairs * responses_per_pair;
-        var received: u64 = 0;
-        var consecutive_empty: u32 = 0;
-        const max_consecutive_empty: u32 = 50;
-
-        while (received < expected_responses and consecutive_empty < max_consecutive_empty) {
-            const maybe_data = tcp_ptr.tryRecv(5) catch |err| {
-                if (err == error.WouldBlock or err == error.Timeout) {
-                    consecutive_empty += 1;
-                    continue;
-                }
-                break;
-            };
-
-            if (maybe_data) |raw_data| {
-                if (parseMessage(raw_data, proto)) |m| {
-                    countMessage(&running_stats, m);
-                    received += 1;
-                    consecutive_empty = 0;
-                }
-            } else {
-                consecutive_empty += 1;
+        if (next_progress_idx < progress_points.len) {
+            const target_pct = progress_points[next_progress_idx];
+            const current_pct = (i * 100) / trades;
+            if (current_pct >= target_pct) {
+                const elapsed_ms = (timestamp.now() - start_time) / NS_PER_MS;
+                const rate: u64 = if (elapsed_ms > 0) pairs_sent * 1000 / elapsed_ms else 0;
+                try print(stderr, "  {d}% | {d} pairs sent | {d} recv'd | {d} trades/sec\n", .{
+                    target_pct, pairs_sent, running_stats.total(), rate,
+                });
+                next_progress_idx += 1;
             }
         }
     }
 
-    const end_time = timestamp.now();
-    const total_time = if (end_time >= start_time) end_time - start_time else 0;
+    const send_end_time = timestamp.now();
+    const send_time = send_end_time - start_time;
     const orders_sent = pairs_sent * 2;
 
-    try print(stderr, "\n=== Complete ===\n", .{});
+    try print(stderr, "\n=== Send Phase Complete ===\n", .{});
     try print(stderr, "Trade pairs:     {d}\n", .{pairs_sent});
     try print(stderr, "Orders sent:     {d}\n", .{orders_sent});
     try print(stderr, "Send errors:     {d}\n", .{send_errors});
+    try printTime(stderr, "Send time:       ", send_time);
+
+    if (send_time > 0) {
+        const send_rate: u64 = pairs_sent * NS_PER_SEC / send_time;
+        try printThroughput(stderr, "Send rate:       ", send_rate);
+    }
+
+    const expected_total = orders_sent + pairs_sent + orders_sent;
+    const already_received = running_stats.total();
+
+    try print(stderr, "\n=== Drain Phase ===\n", .{});
+    try print(stderr, "Already recv'd:  {d}\n", .{already_received});
+    try print(stderr, "Expected total:  {d}\n", .{expected_total});
+    try print(stderr, "Remaining:       {d}\n", .{expected_total - already_received});
+
+    const drain_start = timestamp.now();
+    const final_stats = try drainWithPatience(client, expected_total - already_received, 10000);
+    running_stats.add(final_stats);
+    const drain_time = timestamp.now() - drain_start;
+
+    try print(stderr, "Drain recv'd:    {d}\n", .{final_stats.total()});
+    try printTime(stderr, "Drain time:      ", drain_time);
+
+    const total_time = timestamp.now() - start_time;
+
+    try print(stderr, "\n=== Final Results ===\n", .{});
     try printTime(stderr, "Total time:      ", total_time);
 
     if (total_time > 0) {
         const trade_rate: u64 = pairs_sent * NS_PER_SEC / total_time;
-        try print(stderr, "\n=== Throughput ===\n", .{});
-        try printThroughput(stderr, "Trades/sec:  ", trade_rate);
-    }
-
-    // Final drain for stragglers
-    const expected_total = orders_sent + pairs_sent + orders_sent;
-
-    if (running_stats.total() < expected_total) {
-        try print(stderr, "\nFinal drain (have {d}/{d})...\n", .{ running_stats.total(), expected_total });
-
-        var consecutive_empty: u32 = 0;
-        const max_consecutive_empty: u32 = 100;
-
-        while (running_stats.total() < expected_total and consecutive_empty < max_consecutive_empty) {
-            const maybe_data = tcp_ptr.tryRecv(10) catch |err| {
-                if (err == error.WouldBlock or err == error.Timeout) {
-                    consecutive_empty += 1;
-                    continue;
-                }
-                break;
-            };
-
-            if (maybe_data) |raw_data| {
-                if (parseMessage(raw_data, proto)) |m| {
-                    countMessage(&running_stats, m);
-                    consecutive_empty = 0;
-                }
-            } else {
-                consecutive_empty += 1;
-            }
-        }
+        try printThroughput(stderr, "Trades/sec:      ", trade_rate);
     }
 
     try running_stats.printValidation(orders_sent, pairs_sent, stderr);
@@ -714,7 +596,7 @@ fn printThroughput(file: std.fs.File, prefix: []const u8, per_sec: u64) !void {
 }
 
 // ============================================================
-// Response Handling - Fast Non-Blocking Versions
+// Response Handling
 // ============================================================
 
 fn parseMessage(raw_data: []const u8, proto: Protocol) ?types.OutputMessage {
@@ -735,25 +617,70 @@ fn countMessage(stats: *ResponseStats, msg: types.OutputMessage) void {
     }
 }
 
-/// Fast non-blocking batch drain with small timeout
-fn drainBatchFast(client: *EngineClient, timeout_ms: u32) !ResponseStats {
+/// Drain ALL immediately available responses (non-blocking)
+/// Returns as soon as there's nothing ready - doesn't wait
+fn drainAllAvailable(client: *EngineClient) !ResponseStats {
+    var stats = ResponseStats{};
+    const proto = client.getProtocol();
+
+    const tcp_ptr = &(client.tcp_client orelse return stats);
+
+    // Keep draining until we get nothing back
+    var drain_count: u32 = 0;
+    const max_drain: u32 = 10000; // Safety limit
+
+    while (drain_count < max_drain) : (drain_count += 1) {
+        // poll(0) = immediate return if no data
+        const maybe_data = tcp_ptr.tryRecv(0) catch |err| {
+            if (err == error.WouldBlock or err == error.Timeout) {
+                break; // No data available, we're done
+            }
+            return err;
+        };
+
+        if (maybe_data) |raw_data| {
+            if (parseMessage(raw_data, proto)) |m| {
+                countMessage(&stats, m);
+            }
+        } else {
+            break; // No data available
+        }
+    }
+
+    return stats;
+}
+
+/// Drain with patience - wait for expected_count messages or timeout
+fn drainWithPatience(client: *EngineClient, expected_count: u64, timeout_ms: u64) !ResponseStats {
     var stats = ResponseStats{};
     const proto = client.getProtocol();
 
     const tcp_ptr = &(client.tcp_client orelse return stats);
 
     const start_time = timestamp.now();
-    const timeout_ns: u64 = @as(u64, timeout_ms) * NS_PER_MS;
-    var consecutive_empty: u32 = 0;
-    const max_consecutive_empty: u32 = 10;
+    const timeout_ns = timeout_ms * NS_PER_MS;
 
-    while (timestamp.now() - start_time < timeout_ns and consecutive_empty < max_consecutive_empty) {
-        const maybe_data = tcp_ptr.tryRecv(2) catch |err| {
+    var consecutive_empty: u32 = 0;
+    const max_consecutive_empty: u32 = 500; // Very patient
+
+    while (stats.total() < expected_count) {
+        // Check timeout
+        if (timestamp.now() - start_time > timeout_ns) {
+            break;
+        }
+
+        // Check consecutive empties
+        if (consecutive_empty >= max_consecutive_empty) {
+            break;
+        }
+
+        // Use 10ms timeout to balance responsiveness vs CPU
+        const maybe_data = tcp_ptr.tryRecv(10) catch |err| {
             if (err == error.WouldBlock or err == error.Timeout) {
                 consecutive_empty += 1;
                 continue;
             }
-            break;
+            return err;
         };
 
         if (maybe_data) |raw_data| {
@@ -769,55 +696,17 @@ fn drainBatchFast(client: *EngineClient, timeout_ms: u32) !ResponseStats {
     return stats;
 }
 
-/// Fast non-blocking response drain
-fn drainResponsesFast(client: *EngineClient, timeout_ms: u32) !ResponseStats {
-    var stats = ResponseStats{};
-
-    std.Thread.sleep(20 * NS_PER_MS); // Brief pause to let responses arrive
-
-    const start_time = timestamp.now();
-    const timeout_ns: u64 = @as(u64, timeout_ms) * NS_PER_MS;
-    var consecutive_empty: u32 = 0;
-    const max_consecutive_empty: u32 = 20;
-
-    while (timestamp.now() - start_time < timeout_ns and consecutive_empty < max_consecutive_empty) {
-        if (client.tcp_client) |*tcp_client| {
-            const maybe_data = tcp_client.tryRecv(5) catch |err| {
-                if (err == error.Timeout or err == error.WouldBlock) {
-                    consecutive_empty += 1;
-                    continue;
-                }
-                break;
-            };
-
-            if (maybe_data) |raw_data| {
-                consecutive_empty = 0;
-                if (parseMessage(raw_data, client.getProtocol())) |m| {
-                    countMessage(&stats, m);
-                }
-            } else {
-                consecutive_empty += 1;
-            }
-        } else {
-            break;
-        }
-    }
-
-    return stats;
-}
-
 /// Fast recv and print for interactive scenarios
-/// Uses short timeouts and stops after consecutive empty polls
 fn recvAndPrintResponsesFast(client: *EngineClient, stderr: std.fs.File, max_responses: u32) !void {
     const proto = client.getProtocol();
 
     if (client.tcp_client) |*tcp_client| {
         var response_count: u32 = 0;
         var consecutive_empty: u32 = 0;
-        const max_consecutive_empty: u32 = 5; // Stop after 5 empty polls (~25ms)
+        const max_consecutive_empty: u32 = 10;
 
         while (response_count < max_responses and consecutive_empty < max_consecutive_empty) {
-            const maybe_data = tcp_client.tryRecv(5) catch |err| {
+            const maybe_data = tcp_client.tryRecv(10) catch |err| {
                 if (err == error.Timeout or err == error.WouldBlock) {
                     consecutive_empty += 1;
                     continue;
