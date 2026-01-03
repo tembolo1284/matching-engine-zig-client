@@ -6,7 +6,7 @@ const std = @import("std");
 const config = @import("config.zig");
 const types = @import("types.zig");
 
-// Import protocol modules (these paths will need adjustment for your project)
+// Import protocol modules
 const binary = @import("../protocol/binary.zig");
 const csv = @import("../protocol/csv.zig");
 const proto_types = @import("../protocol/types.zig");

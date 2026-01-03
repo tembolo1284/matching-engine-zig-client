@@ -10,6 +10,7 @@ const types = @import("types.zig");
 const helpers = @import("helpers.zig");
 
 const EngineClient = @import("../client/engine_client.zig").EngineClient;
+const Protocol = @import("../client/engine_client.zig").Protocol;
 const TcpClient = @import("../transport/tcp.zig").TcpClient;
 const timestamp = @import("../util/timestamp.zig");
 
@@ -102,7 +103,7 @@ pub fn drainWithPatience(client: *EngineClient, expected_count: u64, timeout_ms:
 /// Use this in batch-synchronized mode where we send N, then drain N.
 pub fn drainBatch(
     tcp_ptr: *TcpClient,
-    proto: anytype,
+    proto: Protocol,
     expected_count: u64,
     max_empty: u32,
     poll_ms: i32,
