@@ -29,10 +29,10 @@ pub fn runScenario1(client: *EngineClient, stderr: std.fs.File) !void {
     try client.sendNewOrder(1, "IBM", 105, 50, .sell, 2);
     try drain.recvAndPrint(client, stderr, 5);
 
-    // Flush
+    // Flush - need extra patience for cancel acks and final TOB
     try helpers.print(stderr, "\n[SEND] F (Flush - cancel all orders)\n", .{});
     try client.sendFlush();
-    try drain.recvAndPrint(client, stderr, 20);
+    try drain.recvAndPrintPatient(client, stderr, 20);
 
     const elapsed = timestamp.now() - start_time;
     try helpers.print(stderr, "\n", .{});
@@ -57,10 +57,10 @@ pub fn runScenario2(client: *EngineClient, stderr: std.fs.File) !void {
     try client.sendNewOrder(1, "IBM", 100, 50, .sell, 2);
     try drain.recvAndPrint(client, stderr, 5);
 
-    // Flush (should have nothing to cancel after full match)
+    // Flush - need extra patience for final TOB
     try helpers.print(stderr, "\n[SEND] F (Flush - cancel all orders)\n", .{});
     try client.sendFlush();
-    try drain.recvAndPrint(client, stderr, 20);
+    try drain.recvAndPrintPatient(client, stderr, 20);
 
     const elapsed = timestamp.now() - start_time;
     try helpers.print(stderr, "\n", .{});
@@ -85,10 +85,10 @@ pub fn runScenario3(client: *EngineClient, stderr: std.fs.File) !void {
     try client.sendCancel(1, "IBM", 1);
     try drain.recvAndPrint(client, stderr, 5);
 
-    // Flush (should have nothing to cancel)
+    // Flush - need extra patience for final TOB
     try helpers.print(stderr, "\n[SEND] F (Flush - cancel all orders)\n", .{});
     try client.sendFlush();
-    try drain.recvAndPrint(client, stderr, 20);
+    try drain.recvAndPrintPatient(client, stderr, 20);
 
     const elapsed = timestamp.now() - start_time;
     try helpers.print(stderr, "\n", .{});

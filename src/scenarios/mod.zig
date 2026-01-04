@@ -27,6 +27,7 @@ const basic = @import("basic.zig");
 const stress = @import("stress.zig");
 const matching = @import("matching.zig");
 const dual_processor = @import("dual_processor.zig");
+const threaded = @import("threaded.zig");
 
 const EngineClient = @import("../client/engine_client.zig").EngineClient;
 
@@ -65,6 +66,14 @@ pub fn run(client: *EngineClient, scenario: u8, stderr: std.fs.File) !void {
         31 => try dual_processor.runDualProcessorStress(client, stderr, 1_000_000),
         32 => try dual_processor.runDualProcessorStress(client, stderr, 100_000_000),
 
+        // THREADED scenarios (separate send/recv threads)
+        40 => try threaded.runThreadedMatchingStress(client, stderr, 1_000),
+        41 => try threaded.runThreadedMatchingStress(client, stderr, 10_000),
+        42 => try threaded.runThreadedMatchingStress(client, stderr, 100_000),
+        43 => try threaded.runThreadedMatchingStress(client, stderr, 250_000),
+        44 => try threaded.runThreadedMatchingStress(client, stderr, 500_000),
+        45 => try threaded.runThreadedMatchingStress(client, stderr, 1_000_000),
+
         else => {
             try printAvailableScenarios(stderr);
             return error.UnknownScenario;
@@ -94,6 +103,13 @@ pub fn printAvailableScenarios(stderr: std.fs.File) !void {
     try helpers.print(stderr, "  30 - 500K trades  (250K each)\n", .{});
     try helpers.print(stderr, "  31 - 1M trades    (500K each)\n", .{});
     try helpers.print(stderr, "  32 - 100M trades  (50M each)  ★★★ ULTIMATE ★★★\n", .{});
+    try helpers.print(stderr, "\nTHREADED (separate send/recv threads):\n", .{});
+    try helpers.print(stderr, "  40 - 1K trades   (threaded)\n", .{});
+    try helpers.print(stderr, "  41 - 10K trades  (threaded)\n", .{});
+    try helpers.print(stderr, "  42 - 100K trades (threaded)\n", .{});
+    try helpers.print(stderr, "  43 - 250K trades (threaded)\n", .{});
+    try helpers.print(stderr, "  44 - 500K trades (threaded)\n", .{});
+    try helpers.print(stderr, "  45 - 1M trades   (threaded) ★★★ BEAST MODE ★★★\n", .{});
 }
 
 // ============================================================

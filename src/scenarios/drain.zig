@@ -25,23 +25,23 @@ pub fn drainAllAvailable(client: *EngineClient) !types.ResponseStats {
     var stats = types.ResponseStats{};
     const proto = client.getProtocol();
 
-    const tcp_ptr = &(client.tcp_client orelse return stats);
+    if (client.tcp_client) |*tcp_client| {
+        var drain_count: u32 = 0;
+        while (drain_count < config.QUICK_DRAIN_LIMIT) : (drain_count += 1) {
+            const maybe_data = tcp_client.tryRecv(config.QUICK_DRAIN_POLL_MS) catch |err| {
+                if (err == error.WouldBlock or err == error.Timeout) {
+                    break;
+                }
+                return err;
+            };
 
-    var drain_count: u32 = 0;
-    while (drain_count < config.QUICK_DRAIN_LIMIT) : (drain_count += 1) {
-        const maybe_data = tcp_ptr.tryRecv(config.QUICK_DRAIN_POLL_MS) catch |err| {
-            if (err == error.WouldBlock or err == error.Timeout) {
+            if (maybe_data) |raw_data| {
+                if (helpers.parseMessage(raw_data, proto)) |m| {
+                    helpers.countMessage(&stats, m);
+                }
+            } else {
                 break;
             }
-            return err;
-        };
-
-        if (maybe_data) |raw_data| {
-            if (helpers.parseMessage(raw_data, proto)) |m| {
-                helpers.countMessage(&stats, m);
-            }
-        } else {
-            break;
         }
     }
 
@@ -58,37 +58,37 @@ pub fn drainWithPatience(client: *EngineClient, expected_count: u64, timeout_ms:
     var stats = types.ResponseStats{};
     const proto = client.getProtocol();
 
-    const tcp_ptr = &(client.tcp_client orelse return stats);
+    if (client.tcp_client) |*tcp_client| {
+        const start_time = timestamp.now();
+        const timeout_ns = timeout_ms * config.NS_PER_MS;
 
-    const start_time = timestamp.now();
-    const timeout_ns = timeout_ms * config.NS_PER_MS;
+        var consecutive_empty: u32 = 0;
 
-    var consecutive_empty: u32 = 0;
+        while (stats.total() < expected_count) {
+            if (timestamp.now() - start_time > timeout_ns) {
+                break;
+            }
 
-    while (stats.total() < expected_count) {
-        if (timestamp.now() - start_time > timeout_ns) {
-            break;
-        }
+            if (consecutive_empty >= config.MAX_CONSECUTIVE_EMPTY) {
+                break;
+            }
 
-        if (consecutive_empty >= config.MAX_CONSECUTIVE_EMPTY) {
-            break;
-        }
+            const maybe_data = tcp_client.tryRecv(config.PATIENT_DRAIN_POLL_MS) catch |err| {
+                if (err == error.WouldBlock or err == error.Timeout) {
+                    consecutive_empty += 1;
+                    continue;
+                }
+                return err;
+            };
 
-        const maybe_data = tcp_ptr.tryRecv(config.PATIENT_DRAIN_POLL_MS) catch |err| {
-            if (err == error.WouldBlock or err == error.Timeout) {
+            if (maybe_data) |raw_data| {
+                if (helpers.parseMessage(raw_data, proto)) |m| {
+                    helpers.countMessage(&stats, m);
+                    consecutive_empty = 0;
+                }
+            } else {
                 consecutive_empty += 1;
-                continue;
             }
-            return err;
-        };
-
-        if (maybe_data) |raw_data| {
-            if (helpers.parseMessage(raw_data, proto)) |m| {
-                helpers.countMessage(&stats, m);
-                consecutive_empty = 0;
-            }
-        } else {
-            consecutive_empty += 1;
         }
     }
 
@@ -150,6 +150,35 @@ pub fn recvAndPrint(client: *EngineClient, stderr: std.fs.File, max_responses: u
 
         while (response_count < max_responses and consecutive_empty < config.INTERACTIVE_MAX_EMPTY) {
             const maybe_data = tcp_client.tryRecv(config.INTERACTIVE_POLL_MS) catch |err| {
+                if (err == error.Timeout or err == error.WouldBlock) {
+                    consecutive_empty += 1;
+                    continue;
+                }
+                break;
+            };
+
+            if (maybe_data) |raw_data| {
+                consecutive_empty = 0;
+                try helpers.printRawResponse(raw_data, proto, stderr);
+                response_count += 1;
+            } else {
+                consecutive_empty += 1;
+            }
+        }
+    }
+}
+
+/// More patient version for after flush - waits longer for stragglers
+pub fn recvAndPrintPatient(client: *EngineClient, stderr: std.fs.File, max_responses: u32) !void {
+    const proto = client.getProtocol();
+
+    if (client.tcp_client) |*tcp_client| {
+        var response_count: u32 = 0;
+        var consecutive_empty: u32 = 0;
+        const max_empty: u32 = 30; // More patient - 30 * 20ms = 600ms max wait
+
+        while (response_count < max_responses and consecutive_empty < max_empty) {
+            const maybe_data = tcp_client.tryRecv(20) catch |err| {
                 if (err == error.Timeout or err == error.WouldBlock) {
                     consecutive_empty += 1;
                     continue;
