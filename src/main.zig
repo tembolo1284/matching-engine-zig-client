@@ -17,10 +17,7 @@ pub const order_builder = @import("client/order_builder.zig");
 pub const pool = @import("memory/pool.zig");
 pub const ring_buffer = @import("memory/ring_buffer.zig");
 pub const timestamp = @import("util/timestamp.zig");
-
-// Scenarios module (refactored)
 pub const scenarios = @import("scenarios/mod.zig");
-
 // Convenience re-exports
 pub const EngineClient = engine_client.EngineClient;
 pub const Config = engine_client.Config;
@@ -147,7 +144,7 @@ fn parseArgs() Args {
                 positional_index += 1;
             } else if (positional_index == 1) {
                 // Second positional: port
-                args.port = std.fmt.parseInt(u16, port_str, 10) catch 1234;
+                args.port = std.fmt.parseInt(u16, arg, 10) catch 1234;
                 positional_index += 1;
             } else if (positional_index == 2) {
                 // Third positional: scenario
@@ -164,7 +161,7 @@ fn parseArgs() Args {
     return args;
 }
 fn printHelp() void {
-    const stderr = std.io.getStdErr().writer();
+    const stderr = std.fs.File.stderr();
     const help =
         \\Matching Engine Zig Client
         \\
@@ -198,12 +195,12 @@ fn printHelp() void {
         \\  10 - Stress test: 1K orders
         \\  11 - Stress test: 10K orders
         \\  12 - Stress test: 100K orders
-        \\  20 - Matching stress: 1K trade pairs
-        \\  21 - Matching stress: 10K trade pairs
-        \\  22 - Matching stress: 100K trade pairs
-        \\  23 - Matching stress: 250K trade pairs
-        \\  24 - Matching stress: 500K trade pairs
-        \\  25 - Matching stress: 250M trade pairs ★★★ LEGENDARY ★★★
+        \\  20 - Matching stress: 1K trades
+        \\  21 - Matching stress: 10K trades
+        \\  22 - Matching stress: 100K trades
+        \\  23 - Matching stress: 250K trades
+        \\  24 - Matching stress: 500K trades
+        \\  25 - Matching stress: 250M trades ★★★ LEGENDARY ★★★
         \\  30 - Dual-processor: 500K trades (IBM + NVDA)
         \\  31 - Dual-processor: 1M trades
         \\  32 - Dual-processor: 100M trades ★★★ ULTIMATE ★★★
@@ -228,8 +225,8 @@ fn printHelp() void {
 // Interactive Mode (like tcp_client.c)
 // ============================================================
 fn runInteractive(args: Args) !void {
-    const stderr = std.io.getStdErr();
-    const stdin = std.io.getStdIn();
+    const stderr = std.fs.File.stderr();
+    const stdin = std.fs.File.stdin();
     // Show what we're trying
     if (args.transport == .auto) {
         try print(stderr, "Auto-detecting server at {s}:{d}...\n", .{ args.host, args.port });
@@ -509,7 +506,7 @@ fn printResponse(msg: OutputMessage, stderr: std.fs.File) !void {
 // Test Scenarios (delegated to scenarios module)
 // ============================================================
 fn runScenario(args: Args) !void {
-    const stderr = std.io.getStdErr();
+    const stderr = std.fs.File.stderr();
     // Show what we're trying
     try print(stderr, "Connecting to {s}:{d}...\n", .{ args.host, args.port });
     var client = EngineClient.init(.{
@@ -550,7 +547,7 @@ fn runScenario(args: Args) !void {
 // Multicast Subscriber
 // ============================================================
 fn runSubscribe(args: Args) !void {
-    const stderr = std.io.getStdErr();
+    const stderr = std.fs.File.stderr();
     try print(stderr, "Joining multicast group {s}:{d}...\n", .{ args.multicast_group, args.port });
     var subscriber = MulticastSubscriber.join(args.multicast_group, args.port) catch |err| {
         try print(stderr, "Failed to join multicast: {s}\n", .{@errorName(err)});
@@ -570,7 +567,7 @@ fn runSubscribe(args: Args) !void {
 // Benchmark
 // ============================================================
 fn runBenchmark(args: Args) !void {
-    const stderr = std.io.getStdErr();
+    const stderr = std.fs.File.stderr();
     try print(stderr, "Connecting to {s}:{d}...\n", .{ args.host, args.port });
     var client = EngineClient.init(.{
         .host = args.host,
