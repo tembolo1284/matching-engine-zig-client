@@ -147,7 +147,18 @@ pub fn runMatchingStress(client: *EngineClient, stderr: std.fs.File, trades: u64
     // Cleanup
     try helpers.print(stderr, "\n[FLUSH] Cleaning up server state\n", .{});
     try client.sendFlush();
-    std.Thread.sleep(500 * config.NS_PER_MS);
+    
+    // Give server time to process flush and send any remaining responses
+    std.Thread.sleep(100 * config.NS_PER_MS);
+    
+    // Final aggressive drain to catch any stragglers
+    const stragglers = try drainQuick(client, 1000, 10);
+    if (stragglers.total() > 0) {
+        running_stats.add(stragglers);
+        try helpers.print(stderr, "Late arrivals:   {d}\n", .{stragglers.total()});
+    }
+    
+    std.Thread.sleep(100 * config.NS_PER_MS);
 }
 
 // ============================================================
@@ -162,7 +173,7 @@ fn drainQuick(client: *EngineClient, max_msgs: u64, poll_ms: i32) !types.Respons
     if (client.tcp_client) |*tcp_client| {
         var received: u64 = 0;
         var consecutive_empty: u32 = 0;
-        const max_empty: u32 = 3; // Give up after 3 empty polls
+        const max_empty: u32 = 10; // Give up after 10 empty polls (50ms at 5ms each)
 
         while (received < max_msgs and consecutive_empty < max_empty) {
             const maybe_data = tcp_client.tryRecv(poll_ms) catch |err| {
@@ -183,6 +194,9 @@ fn drainQuick(client: *EngineClient, max_msgs: u64, poll_ms: i32) !types.Respons
                 consecutive_empty += 1;
             }
         }
+    } else {
+        // Debug: no tcp_client!
+        // helpers.print(stderr, "[DEBUG] drainQuick: no tcp_client!\n", .{}) catch {};
     }
 
     return stats;
