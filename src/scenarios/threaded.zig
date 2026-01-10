@@ -1,12 +1,6 @@
 //! Threaded Matching Scenarios with Buffered Interleaved I/O
 //!
 //! Uses BUFFERED sends with INTERLEAVED drain to prevent server overflow.
-//! This is the optimal approach for high-throughput without overwhelming the server.
-//!
-//! Strategy:
-//!   1. Send batch of N order pairs (buffered → single syscall)
-//!   2. Drain responses until we've received ~80% of expected
-//!   3. Repeat
 
 const std = @import("std");
 const config = @import("config.zig");
@@ -22,20 +16,25 @@ const binary = @import("../protocol/binary.zig");
 const proto_types = @import("../protocol/types.zig");
 
 // ============================================================
-// Configuration - Tune these for performance
+// Configuration - TUNED FOR SPEED
 // ============================================================
 
 /// Number of order pairs per batch before draining
-const BATCH_SIZE: u64 = 50;
+/// Larger batches = higher throughput but more server pressure
+const BATCH_SIZE: u64 = 200;
 
 /// Target drain percentage before sending next batch
-const DRAIN_TARGET_PCT: f64 = 0.8;
+/// Lower = faster but riskier. 0.5 = proceed after 50% received
+const DRAIN_TARGET_PCT: f64 = 0.5;
 
-/// Maximum empty polls before giving up on drain
-const DRAIN_MAX_EMPTY: u32 = 100;
+/// Maximum empty polls before giving up on drain (per batch)
+const DRAIN_MAX_EMPTY: u32 = 50;
 
-/// Poll timeout per drain attempt (ms)
-const DRAIN_POLL_MS: i32 = 5;
+/// Poll timeout per drain attempt (ms) - shorter = faster loop
+const DRAIN_POLL_MS: i32 = 1;
+
+/// Final drain timeout (ms) - needs to be long enough to get stragglers
+const FINAL_DRAIN_TIMEOUT_MS: u64 = 30000;
 
 // ============================================================
 // Main Entry Point - Buffered Interleaved
@@ -50,7 +49,7 @@ pub fn runThreadedMatchingStress(client: *EngineClient, stderr: std.fs.File, tra
     try helpers.print(stderr, "=== BUFFERED INTERLEAVED Matching Stress: {d} Trades ===\n\n", .{trades});
     try printTarget(stderr, trades, orders);
     try helpers.print(stderr, "Mode: Buffered send + interleaved drain\n", .{});
-    try helpers.print(stderr, "Batch size: {d} pairs\n", .{BATCH_SIZE});
+    try helpers.print(stderr, "Batch size: {d} pairs ({d} orders)\n", .{ BATCH_SIZE, BATCH_SIZE * 2 });
     try helpers.print(stderr, "Drain target: {d}%\n\n", .{@as(u64, @intFromFloat(DRAIN_TARGET_PCT * 100))});
 
     // Initial flush to clear server state
@@ -70,7 +69,7 @@ pub fn runThreadedMatchingStress(client: *EngineClient, stderr: std.fs.File, tra
     var batches_sent: u64 = 0;
 
     const start_time = timestamp.now();
-    const progress_interval = @max(trades / 20, 1); // Report every 5%
+    const progress_interval = @max(trades / 10, 1); // Report every 10%
     var last_progress: u64 = 0;
 
     // Main loop: send batch, drain, repeat
@@ -102,7 +101,8 @@ pub fn runThreadedMatchingStress(client: *EngineClient, stderr: std.fs.File, tra
         pairs_sent += this_batch;
         batches_sent += 1;
 
-        // === DRAIN PHASE: Wait for responses ===
+        // === DRAIN PHASE: Quick drain, don't wait too long ===
+        // We want to drain what's available quickly, not block waiting
         const expected_so_far = pairs_sent * expected_msgs_per_pair;
         const drain_target = @as(u64, @intFromFloat(@as(f64, @floatFromInt(expected_so_far)) * DRAIN_TARGET_PCT));
         const need_to_drain = if (drain_target > stats.total()) drain_target - stats.total() else 0;
@@ -118,7 +118,7 @@ pub fn runThreadedMatchingStress(client: *EngineClient, stderr: std.fs.File, tra
             stats.add(batch_stats);
         }
 
-        // Progress reporting
+        // Progress reporting every 10%
         if (pairs_sent >= last_progress + progress_interval) {
             const elapsed_ms = (timestamp.now() - start_time) / config.NS_PER_MS;
             const rate = if (elapsed_ms > 0) pairs_sent * 1000 / elapsed_ms else 0;
@@ -149,21 +149,22 @@ pub fn runThreadedMatchingStress(client: *EngineClient, stderr: std.fs.File, tra
         try helpers.printThroughput(stderr, "Send rate:       ", send_rate);
     }
 
-    // Final drain - get any remaining responses
+    // Final drain - get ALL remaining responses with patience
     try helpers.print(stderr, "\n=== Final Drain ===\n", .{});
     try helpers.print(stderr, "Already recv'd:  {d}\n", .{stats.total()});
     try helpers.print(stderr, "Expected total:  {d}\n", .{total_expected_msgs});
 
     const final_drain_start = timestamp.now();
-    const remaining_expected = if (total_expected_msgs > stats.total()) 
-        total_expected_msgs - stats.total() 
-    else 
+    const remaining_expected = if (total_expected_msgs > stats.total())
+        total_expected_msgs - stats.total()
+    else
         0;
-    
+
+    // Use longer timeout for final drain to get all stragglers
     const final_stats = drain.drainWithPatience(
         client,
         remaining_expected,
-        10000, // 10 second timeout for final drain
+        FINAL_DRAIN_TIMEOUT_MS,
     ) catch types.ResponseStats{};
     stats.add(final_stats);
 
@@ -228,7 +229,7 @@ pub fn runThreadedDualProcessorStress(client: *EngineClient, stderr: std.fs.File
 
     const symbols = [_][]const u8{ "IBM", "TSLA" };
     const start_time = timestamp.now();
-    const progress_interval = @max(trades / 20, 1);
+    const progress_interval = @max(trades / 10, 1);
     var last_progress: u64 = 0;
 
     while (pairs_sent < trades) {
@@ -261,7 +262,7 @@ pub fn runThreadedDualProcessorStress(client: *EngineClient, stderr: std.fs.File
             stats.add(batch_stats);
         }
 
-        // Progress
+        // Progress every 10%
         if (pairs_sent >= last_progress + progress_interval) {
             const elapsed_ms = (timestamp.now() - start_time) / config.NS_PER_MS;
             const rate = if (elapsed_ms > 0) pairs_sent * 1000 / elapsed_ms else 0;
@@ -278,10 +279,10 @@ pub fn runThreadedDualProcessorStress(client: *EngineClient, stderr: std.fs.File
     try helpers.print(stderr, "Batches:         {d}\n", .{batches_sent});
     try helpers.printTime(stderr, "Send time:       ", send_time);
 
-    // Final drain
+    // Final drain with longer timeout
     try helpers.print(stderr, "\n=== Final Drain ===\n", .{});
     const remaining_expected = if (total_expected_msgs > stats.total()) total_expected_msgs - stats.total() else 0;
-    const final_stats = drain.drainWithPatience(client, remaining_expected, 10000) catch types.ResponseStats{};
+    const final_stats = drain.drainWithPatience(client, remaining_expected, FINAL_DRAIN_TIMEOUT_MS) catch types.ResponseStats{};
     stats.add(final_stats);
 
     const total_time = timestamp.now() - start_time;
