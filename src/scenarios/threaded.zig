@@ -1,17 +1,18 @@
-//! Threaded Matching Scenarios with Buffered I/O
+//! Threaded Matching Scenarios with Buffered Interleaved I/O
 //!
-//! Uses separate sender and receiver threads for maximum throughput.
-//! The sender uses BUFFERED writes to minimize syscall overhead.
+//! Uses BUFFERED sends with INTERLEAVED drain to prevent server overflow.
+//! This is the optimal approach for high-throughput without overwhelming the server.
 //!
-//! KEY OPTIMIZATION: Instead of one syscall per order, we buffer
-//! multiple orders and send them in a single syscall.
-//!
-//! Expected performance improvement: 10-50x over unbuffered sends.
+//! Strategy:
+//!   1. Send batch of N order pairs (buffered → single syscall)
+//!   2. Drain responses until we've received ~80% of expected
+//!   3. Repeat
 
 const std = @import("std");
 const config = @import("config.zig");
 const types = @import("types.zig");
 const helpers = @import("helpers.zig");
+const drain = @import("drain.zig");
 
 const EngineClient = @import("../client/engine_client.zig").EngineClient;
 const Protocol = @import("../client/engine_client.zig").Protocol;
@@ -21,477 +22,282 @@ const binary = @import("../protocol/binary.zig");
 const proto_types = @import("../protocol/types.zig");
 
 // ============================================================
-// Configuration
+// Configuration - Tune these for performance
 // ============================================================
 
-/// Number of order pairs to buffer before flushing
-/// Higher = fewer syscalls = better throughput
-/// Lower = lower latency for individual messages
-const FLUSH_BATCH_SIZE: u64 = 100;
+/// Number of order pairs per batch before draining
+const BATCH_SIZE: u64 = 50;
+
+/// Target drain percentage before sending next batch
+const DRAIN_TARGET_PCT: f64 = 0.8;
+
+/// Maximum empty polls before giving up on drain
+const DRAIN_MAX_EMPTY: u32 = 100;
+
+/// Poll timeout per drain attempt (ms)
+const DRAIN_POLL_MS: i32 = 5;
 
 // ============================================================
-// Shared State Between Threads
-// ============================================================
-
-const SharedState = struct {
-    // Counters (atomic)
-    pairs_sent: std.atomic.Value(u64) = std.atomic.Value(u64).init(0),
-    messages_received: std.atomic.Value(u64) = std.atomic.Value(u64).init(0),
-    acks_received: std.atomic.Value(u64) = std.atomic.Value(u64).init(0),
-    trades_received: std.atomic.Value(u64) = std.atomic.Value(u64).init(0),
-    tob_received: std.atomic.Value(u64) = std.atomic.Value(u64).init(0),
-    send_errors: std.atomic.Value(u64) = std.atomic.Value(u64).init(0),
-    recv_errors: std.atomic.Value(u64) = std.atomic.Value(u64).init(0),
-    flushes: std.atomic.Value(u64) = std.atomic.Value(u64).init(0),
-
-    // Control flags
-    sender_done: std.atomic.Value(bool) = std.atomic.Value(bool).init(false),
-    receiver_should_stop: std.atomic.Value(bool) = std.atomic.Value(bool).init(false),
-
-    // Target
-    target_trades: u64,
-
-    // Timing
-    start_time: u64 = 0,
-    send_end_time: u64 = 0,
-
-    pub fn init(target: u64) SharedState {
-        return SharedState{
-            .target_trades = target,
-        };
-    }
-
-    pub fn getStats(self: *SharedState) types.ResponseStats {
-        return types.ResponseStats{
-            .acks = self.acks_received.load(.monotonic),
-            .trades = self.trades_received.load(.monotonic),
-            .top_of_book = self.tob_received.load(.monotonic),
-        };
-    }
-};
-
-// ============================================================
-// Receiver Thread
-// ============================================================
-
-fn receiverThread(tcp_client: *TcpClient, state: *SharedState, proto: Protocol) void {
-    const expected_total = state.target_trades * 5; // 2 ACKs + 1 Trade + 2 TOB per pair
-
-    while (true) {
-        // Check if we should stop
-        if (state.receiver_should_stop.load(.monotonic)) {
-            break;
-        }
-
-        // Check if we have all messages
-        const received = state.messages_received.load(.monotonic);
-        if (received >= expected_total and state.sender_done.load(.monotonic)) {
-            break;
-        }
-
-        // Try to receive with short timeout
-        const maybe_data = tcp_client.tryRecv(1) catch |err| {
-            if (err == error.Timeout or err == error.WouldBlock) {
-                // No data ready, check if sender is done
-                if (state.sender_done.load(.monotonic)) {
-                    const idle_start = timestamp.now();
-                    var consecutive_empty: u32 = 0;
-                    
-                    // Patient drain after sender is done
-                    while (consecutive_empty < 100) {
-                        const drain_data = tcp_client.tryRecv(10) catch {
-                            consecutive_empty += 1;
-                            continue;
-                        };
-                        
-                        if (drain_data) |data| {
-                            consecutive_empty = 0;
-                            countResponse(data, proto, state);
-                        } else {
-                            consecutive_empty += 1;
-                        }
-                        
-                        if (timestamp.now() - idle_start > 5 * config.NS_PER_SEC) {
-                            break;
-                        }
-                    }
-                    break;
-                }
-                continue;
-            }
-            _ = state.recv_errors.fetchAdd(1, .monotonic);
-            continue;
-        };
-
-        if (maybe_data) |data| {
-            countResponse(data, proto, state);
-        }
-    }
-}
-
-fn countResponse(data: []const u8, proto: Protocol, state: *SharedState) void {
-    _ = state.messages_received.fetchAdd(1, .monotonic);
-
-    if (proto == .binary) {
-        if (binary.decodeOutput(data)) |msg| {
-            switch (msg.msg_type) {
-                .ack => _ = state.acks_received.fetchAdd(1, .monotonic),
-                .trade => _ = state.trades_received.fetchAdd(1, .monotonic),
-                .top_of_book => _ = state.tob_received.fetchAdd(1, .monotonic),
-                else => {},
-            }
-        } else |_| {}
-    }
-}
-
-// ============================================================
-// Sender Thread (BUFFERED - Key Optimization)
-// ============================================================
-
-fn senderThread(client: *EngineClient, state: *SharedState) void {
-    const target = state.target_trades;
-
-    var i: u64 = 0;
-    while (i < target) : (i += 1) {
-        const price: u32 = 100 + @as(u32, @intCast(i % 50));
-        const buy_oid: u32 = @intCast((i * 2 + 1) % 0xFFFFFFFF);
-        const sell_oid: u32 = @intCast((i * 2 + 2) % 0xFFFFFFFF);
-
-        // Send buy (BUFFERED - no syscall yet!)
-        client.sendNewOrderBuffered(1, "IBM", price, 10, .buy, buy_oid) catch {
-            _ = state.send_errors.fetchAdd(1, .monotonic);
-            continue;
-        };
-
-        // Send sell (BUFFERED - no syscall yet!)
-        client.sendNewOrderBuffered(1, "IBM", price, 10, .sell, sell_oid) catch {
-            _ = state.send_errors.fetchAdd(1, .monotonic);
-            continue;
-        };
-
-        _ = state.pairs_sent.fetchAdd(1, .monotonic);
-
-        // Flush every FLUSH_BATCH_SIZE pairs (single syscall for all buffered messages)
-        if ((i + 1) % FLUSH_BATCH_SIZE == 0) {
-            client.flush() catch {
-                _ = state.send_errors.fetchAdd(1, .monotonic);
-            };
-            _ = state.flushes.fetchAdd(1, .monotonic);
-        }
-    }
-
-    // Final flush for any remaining buffered messages
-    client.flush() catch {
-        _ = state.send_errors.fetchAdd(1, .monotonic);
-    };
-    _ = state.flushes.fetchAdd(1, .monotonic);
-
-    state.send_end_time = timestamp.now();
-    state.sender_done.store(true, .monotonic);
-}
-
-// ============================================================
-// Main Entry Point
+// Main Entry Point - Buffered Interleaved
 // ============================================================
 
 pub fn runThreadedMatchingStress(client: *EngineClient, stderr: std.fs.File, trades: u64) !void {
     const orders = trades * 2;
+    const expected_msgs_per_pair: u64 = 5; // 2 ACK + 1 Trade + 2 TOB
+    const total_expected_msgs = trades * expected_msgs_per_pair;
 
     // Header
-    try helpers.print(stderr, "=== THREADED Matching Stress (BUFFERED): {d} Trades ===\n\n", .{trades});
+    try helpers.print(stderr, "=== BUFFERED INTERLEAVED Matching Stress: {d} Trades ===\n\n", .{trades});
     try printTarget(stderr, trades, orders);
-    try helpers.print(stderr, "Mode: Separate sender/receiver threads\n", .{});
-    try helpers.print(stderr, "Batch size: {d} pairs per flush\n\n", .{FLUSH_BATCH_SIZE});
+    try helpers.print(stderr, "Mode: Buffered send + interleaved drain\n", .{});
+    try helpers.print(stderr, "Batch size: {d} pairs\n", .{BATCH_SIZE});
+    try helpers.print(stderr, "Drain target: {d}%\n\n", .{@as(u64, @intFromFloat(DRAIN_TARGET_PCT * 100))});
 
-    // Initial flush
+    // Initial flush to clear server state
     try client.sendFlush();
     std.Thread.sleep(200 * config.NS_PER_MS);
 
     // Drain any stale data
-    if (client.tcp_client) |*tcp| {
-        while (true) {
-            const d = tcp.tryRecv(0) catch break;
-            if (d == null) break;
-        }
-    }
+    _ = drain.drainAllAvailable(client) catch {};
 
-    var state = SharedState.init(trades);
-    state.start_time = timestamp.now();
-
+    // Get TCP client and protocol for direct drain calls
     const tcp_ptr = &(client.tcp_client orelse return error.NotConnected);
     const proto = client.getProtocol();
 
-    // Start receiver thread
-    const receiver = std.Thread.spawn(.{}, receiverThread, .{ tcp_ptr, &state, proto }) catch |err| {
-        try helpers.print(stderr, "Failed to spawn receiver thread: {s}\n", .{@errorName(err)});
-        return err;
-    };
+    // Stats tracking
+    var stats = types.ResponseStats{};
+    var pairs_sent: u64 = 0;
+    var batches_sent: u64 = 0;
 
-    // Start sender thread
-    const sender = std.Thread.spawn(.{}, senderThread, .{ client, &state }) catch |err| {
-        state.receiver_should_stop.store(true, .monotonic);
-        receiver.join();
-        try helpers.print(stderr, "Failed to spawn sender thread: {s}\n", .{@errorName(err)});
-        return err;
-    };
+    const start_time = timestamp.now();
+    const progress_interval = @max(trades / 20, 1); // Report every 5%
+    var last_progress: u64 = 0;
 
-    // Progress reporting from main thread
-    const progress_points = [_]u64{ 25, 50, 75 };
-    var next_progress_idx: usize = 0;
+    // Main loop: send batch, drain, repeat
+    while (pairs_sent < trades) {
+        // Calculate this batch size (may be smaller for last batch)
+        const remaining = trades - pairs_sent;
+        const this_batch = @min(BATCH_SIZE, remaining);
 
-    while (!state.sender_done.load(.monotonic)) {
-        std.Thread.sleep(50 * config.NS_PER_MS);
+        // === SEND PHASE: Buffered batch ===
+        for (0..this_batch) |j| {
+            const i = pairs_sent + j;
+            const price: u32 = 100 + @as(u32, @intCast(i % 50));
+            const buy_oid: u32 = @intCast((i * 2 + 1) % 0xFFFFFFFF);
+            const sell_oid: u32 = @intCast((i * 2 + 2) % 0xFFFFFFFF);
 
-        const pairs = state.pairs_sent.load(.monotonic);
-        const received = state.messages_received.load(.monotonic);
+            // Queue buy order (no syscall)
+            client.sendNewOrderBuffered(1, "IBM", price, 10, .buy, buy_oid) catch continue;
 
-        if (next_progress_idx < progress_points.len) {
-            const target_pct = progress_points[next_progress_idx];
-            const current_pct = (pairs * 100) / trades;
-            if (current_pct >= target_pct) {
-                const elapsed_ms = (timestamp.now() - state.start_time) / config.NS_PER_MS;
-                const rate: u64 = if (elapsed_ms > 0) pairs * 1000 / elapsed_ms else 0;
-                try helpers.print(stderr, "  {d}% | {d} pairs sent | {d} recv'd | {d} trades/sec\n", .{
-                    target_pct, pairs, received, rate,
-                });
-                next_progress_idx += 1;
-            }
+            // Queue sell order (no syscall)
+            client.sendNewOrderBuffered(1, "IBM", price, 10, .sell, sell_oid) catch continue;
+        }
+
+        // Flush the batch (single syscall for all orders)
+        client.flush() catch {
+            try helpers.print(stderr, "ERROR: Flush failed at batch {d}\n", .{batches_sent});
+            return error.FlushFailed;
+        };
+
+        pairs_sent += this_batch;
+        batches_sent += 1;
+
+        // === DRAIN PHASE: Wait for responses ===
+        const expected_so_far = pairs_sent * expected_msgs_per_pair;
+        const drain_target = @as(u64, @intFromFloat(@as(f64, @floatFromInt(expected_so_far)) * DRAIN_TARGET_PCT));
+        const need_to_drain = if (drain_target > stats.total()) drain_target - stats.total() else 0;
+
+        if (need_to_drain > 0) {
+            const batch_stats = drain.drainBatch(
+                tcp_ptr,
+                proto,
+                need_to_drain,
+                DRAIN_MAX_EMPTY,
+                DRAIN_POLL_MS,
+            ) catch types.ResponseStats{};
+            stats.add(batch_stats);
+        }
+
+        // Progress reporting
+        if (pairs_sent >= last_progress + progress_interval) {
+            const elapsed_ms = (timestamp.now() - start_time) / config.NS_PER_MS;
+            const rate = if (elapsed_ms > 0) pairs_sent * 1000 / elapsed_ms else 0;
+            const pct = (pairs_sent * 100) / trades;
+            const recv_pct = (stats.total() * 100) / total_expected_msgs;
+
+            try helpers.print(stderr, "  {d}% sent | {d}% recv | {d} trades/sec\n", .{
+                pct, recv_pct, rate,
+            });
+            last_progress = pairs_sent;
         }
     }
 
-    // Wait for sender to finish
-    sender.join();
-
-    const send_time = state.send_end_time - state.start_time;
-    const pairs_sent = state.pairs_sent.load(.monotonic);
-    const orders_sent = pairs_sent * 2;
-    const flushes = state.flushes.load(.monotonic);
+    const send_end_time = timestamp.now();
+    const send_time = send_end_time - start_time;
 
     // Report send phase
     try helpers.print(stderr, "\n=== Send Phase Complete ===\n", .{});
     try helpers.print(stderr, "Trade pairs:     {d}\n", .{pairs_sent});
-    try helpers.print(stderr, "Orders sent:     {d}\n", .{orders_sent});
-    try helpers.print(stderr, "Flush calls:     {d}\n", .{flushes});
-    if (flushes > 0) {
-        try helpers.print(stderr, "Msgs per flush:  {d:.1}\n", .{
-            @as(f64, @floatFromInt(orders_sent)) / @as(f64, @floatFromInt(flushes)),
-        });
-    }
-    try helpers.print(stderr, "Send errors:     {d}\n", .{state.send_errors.load(.monotonic)});
+    try helpers.print(stderr, "Orders sent:     {d}\n", .{pairs_sent * 2});
+    try helpers.print(stderr, "Batches:         {d}\n", .{batches_sent});
+    try helpers.print(stderr, "Avg batch size:  {d:.1}\n", .{
+        @as(f64, @floatFromInt(pairs_sent)) / @as(f64, @floatFromInt(batches_sent)),
+    });
     try helpers.printTime(stderr, "Send time:       ", send_time);
     if (send_time > 0) {
-        const send_rate: u64 = pairs_sent * config.NS_PER_SEC / send_time;
+        const send_rate = pairs_sent * config.NS_PER_SEC / send_time;
         try helpers.printThroughput(stderr, "Send rate:       ", send_rate);
     }
 
-    // Wait for receiver to drain (with timeout)
-    try helpers.print(stderr, "\n=== Waiting for receiver... ===\n", .{});
+    // Final drain - get any remaining responses
+    try helpers.print(stderr, "\n=== Final Drain ===\n", .{});
+    try helpers.print(stderr, "Already recv'd:  {d}\n", .{stats.total()});
+    try helpers.print(stderr, "Expected total:  {d}\n", .{total_expected_msgs});
+
+    const final_drain_start = timestamp.now();
+    const remaining_expected = if (total_expected_msgs > stats.total()) 
+        total_expected_msgs - stats.total() 
+    else 
+        0;
     
-    const expected_total = orders_sent + pairs_sent + orders_sent;
-    const drain_start = timestamp.now();
-    const max_drain_time = 10 * config.NS_PER_SEC;
+    const final_stats = drain.drainWithPatience(
+        client,
+        remaining_expected,
+        10000, // 10 second timeout for final drain
+    ) catch types.ResponseStats{};
+    stats.add(final_stats);
 
-    while (timestamp.now() - drain_start < max_drain_time) {
-        const received = state.messages_received.load(.monotonic);
-        if (received >= expected_total) {
-            break;
-        }
-        std.Thread.sleep(100 * config.NS_PER_MS);
-    }
+    const final_drain_time = timestamp.now() - final_drain_start;
+    try helpers.print(stderr, "Drain recv'd:    {d}\n", .{final_stats.total()});
+    try helpers.printTime(stderr, "Drain time:      ", final_drain_time);
 
-    // Signal receiver to stop and wait
-    state.receiver_should_stop.store(true, .monotonic);
-    receiver.join();
-
-    const total_time = timestamp.now() - state.start_time;
+    const total_time = timestamp.now() - start_time;
 
     // Final results
     try helpers.print(stderr, "\n=== Final Results ===\n", .{});
     try helpers.printTime(stderr, "Total time:      ", total_time);
     if (total_time > 0) {
-        const trade_rate: u64 = pairs_sent * config.NS_PER_SEC / total_time;
+        const trade_rate = pairs_sent * config.NS_PER_SEC / total_time;
         try helpers.printThroughput(stderr, "Trades/sec:      ", trade_rate);
-        
-        // Show improvement estimate
-        const estimated_unbuffered_rate: u64 = 1000; // ~1K/sec without buffering
-        const speedup = trade_rate / estimated_unbuffered_rate;
-        if (speedup > 1) {
-            try helpers.print(stderr, "Est. speedup:    ~{d}x vs unbuffered\n", .{speedup});
-        }
     }
 
-    const stats = state.getStats();
-    try stats.printValidation(orders_sent, pairs_sent, stderr);
+    try helpers.print(stderr, "\n=== Server Response Summary ===\n", .{});
+    try helpers.print(stderr, "ACKs:            {d}\n", .{stats.acks});
+    try helpers.print(stderr, "Trades:          {d}\n", .{stats.trades});
+    try helpers.print(stderr, "Top of Book:     {d}\n", .{stats.top_of_book});
+    try helpers.print(stderr, "Total messages:  {d}\n", .{stats.total()});
+
+    try stats.printValidation(pairs_sent * 2, pairs_sent, stderr);
 
     // Cleanup
     try helpers.print(stderr, "\n[FLUSH] Cleaning up server state\n", .{});
     try client.sendFlush();
     std.Thread.sleep(500 * config.NS_PER_MS);
+
+    // Drain any late arrivals
+    const late = drain.drainAllAvailable(client) catch types.ResponseStats{};
+    if (late.total() > 0) {
+        try helpers.print(stderr, "Late arrivals:   {d}\n", .{late.total()});
+    }
 }
 
 // ============================================================
-// Dual-Processor Threaded Version (Exercises Both Processors)
+// Dual-Processor Version
 // ============================================================
 
 pub fn runThreadedDualProcessorStress(client: *EngineClient, stderr: std.fs.File, trades: u64) !void {
     const orders = trades * 2;
+    const expected_msgs_per_pair: u64 = 5;
+    const total_expected_msgs = trades * expected_msgs_per_pair;
 
-    try helpers.print(stderr, "=== DUAL-PROCESSOR Matching Stress (BUFFERED): {d} Trades ===\n\n", .{trades});
+    try helpers.print(stderr, "=== DUAL-PROCESSOR BUFFERED INTERLEAVED: {d} Trades ===\n\n", .{trades});
     try printTarget(stderr, trades, orders);
-    try helpers.print(stderr, "Mode: Dual-processor (A-M: IBM, N-Z: TSLA)\n", .{});
-    try helpers.print(stderr, "Batch size: {d} pairs per flush\n\n", .{FLUSH_BATCH_SIZE});
+    try helpers.print(stderr, "Mode: Dual-processor (IBM + TSLA) + buffered interleaved\n", .{});
+    try helpers.print(stderr, "Batch size: {d} pairs\n\n", .{BATCH_SIZE});
 
-    // Initial flush
     try client.sendFlush();
     std.Thread.sleep(200 * config.NS_PER_MS);
-
-    // Drain any stale data
-    if (client.tcp_client) |*tcp| {
-        while (true) {
-            const d = tcp.tryRecv(0) catch break;
-            if (d == null) break;
-        }
-    }
-
-    var state = SharedState.init(trades);
-    state.start_time = timestamp.now();
+    _ = drain.drainAllAvailable(client) catch {};
 
     const tcp_ptr = &(client.tcp_client orelse return error.NotConnected);
     const proto = client.getProtocol();
 
-    // Start receiver thread
-    const receiver = std.Thread.spawn(.{}, receiverThread, .{ tcp_ptr, &state, proto }) catch |err| {
-        try helpers.print(stderr, "Failed to spawn receiver thread: {s}\n", .{@errorName(err)});
-        return err;
-    };
+    var stats = types.ResponseStats{};
+    var pairs_sent: u64 = 0;
+    var batches_sent: u64 = 0;
 
-    // Start sender thread (dual-processor version)
-    const sender = std.Thread.spawn(.{}, senderThreadDualProcessor, .{ client, &state }) catch |err| {
-        state.receiver_should_stop.store(true, .monotonic);
-        receiver.join();
-        try helpers.print(stderr, "Failed to spawn sender thread: {s}\n", .{@errorName(err)});
-        return err;
-    };
+    const symbols = [_][]const u8{ "IBM", "TSLA" };
+    const start_time = timestamp.now();
+    const progress_interval = @max(trades / 20, 1);
+    var last_progress: u64 = 0;
 
-    // Progress reporting (same as single processor)
-    const progress_points = [_]u64{ 25, 50, 75 };
-    var next_progress_idx: usize = 0;
+    while (pairs_sent < trades) {
+        const remaining = trades - pairs_sent;
+        const this_batch = @min(BATCH_SIZE, remaining);
 
-    while (!state.sender_done.load(.monotonic)) {
-        std.Thread.sleep(50 * config.NS_PER_MS);
+        // Send batch (alternating symbols)
+        for (0..this_batch) |j| {
+            const i = pairs_sent + j;
+            const symbol = symbols[i % 2];
+            const price: u32 = 100 + @as(u32, @intCast(i % 50));
+            const buy_oid: u32 = @intCast((i * 2 + 1) % 0xFFFFFFFF);
+            const sell_oid: u32 = @intCast((i * 2 + 2) % 0xFFFFFFFF);
 
-        const pairs = state.pairs_sent.load(.monotonic);
-        const received = state.messages_received.load(.monotonic);
+            client.sendNewOrderBuffered(1, symbol, price, 10, .buy, buy_oid) catch continue;
+            client.sendNewOrderBuffered(1, symbol, price, 10, .sell, sell_oid) catch continue;
+        }
 
-        if (next_progress_idx < progress_points.len) {
-            const target_pct = progress_points[next_progress_idx];
-            const current_pct = (pairs * 100) / trades;
-            if (current_pct >= target_pct) {
-                const elapsed_ms = (timestamp.now() - state.start_time) / config.NS_PER_MS;
-                const rate: u64 = if (elapsed_ms > 0) pairs * 1000 / elapsed_ms else 0;
-                try helpers.print(stderr, "  {d}% | {d} pairs sent | {d} recv'd | {d} trades/sec\n", .{
-                    target_pct, pairs, received, rate,
-                });
-                next_progress_idx += 1;
-            }
+        client.flush() catch return error.FlushFailed;
+        pairs_sent += this_batch;
+        batches_sent += 1;
+
+        // Drain phase
+        const expected_so_far = pairs_sent * expected_msgs_per_pair;
+        const drain_target = @as(u64, @intFromFloat(@as(f64, @floatFromInt(expected_so_far)) * DRAIN_TARGET_PCT));
+        const need_to_drain = if (drain_target > stats.total()) drain_target - stats.total() else 0;
+
+        if (need_to_drain > 0) {
+            const batch_stats = drain.drainBatch(tcp_ptr, proto, need_to_drain, DRAIN_MAX_EMPTY, DRAIN_POLL_MS) catch types.ResponseStats{};
+            stats.add(batch_stats);
+        }
+
+        // Progress
+        if (pairs_sent >= last_progress + progress_interval) {
+            const elapsed_ms = (timestamp.now() - start_time) / config.NS_PER_MS;
+            const rate = if (elapsed_ms > 0) pairs_sent * 1000 / elapsed_ms else 0;
+            const pct = (pairs_sent * 100) / trades;
+            try helpers.print(stderr, "  {d}% | {d} trades/sec\n", .{ pct, rate });
+            last_progress = pairs_sent;
         }
     }
 
-    sender.join();
-
-    const send_time = state.send_end_time - state.start_time;
-    const pairs_sent = state.pairs_sent.load(.monotonic);
-    const orders_sent = pairs_sent * 2;
-    const flushes = state.flushes.load(.monotonic);
+    const send_time = timestamp.now() - start_time;
 
     try helpers.print(stderr, "\n=== Send Phase Complete ===\n", .{});
     try helpers.print(stderr, "Trade pairs:     {d}\n", .{pairs_sent});
-    try helpers.print(stderr, "Orders sent:     {d}\n", .{orders_sent});
-    try helpers.print(stderr, "Flush calls:     {d}\n", .{flushes});
+    try helpers.print(stderr, "Batches:         {d}\n", .{batches_sent});
     try helpers.printTime(stderr, "Send time:       ", send_time);
-    if (send_time > 0) {
-        const send_rate: u64 = pairs_sent * config.NS_PER_SEC / send_time;
-        try helpers.printThroughput(stderr, "Send rate:       ", send_rate);
-    }
 
-    // Wait for receiver
-    try helpers.print(stderr, "\n=== Waiting for receiver... ===\n", .{});
-    
-    const expected_total = orders_sent + pairs_sent + orders_sent;
-    const drain_start = timestamp.now();
-    const max_drain_time = 10 * config.NS_PER_SEC;
+    // Final drain
+    try helpers.print(stderr, "\n=== Final Drain ===\n", .{});
+    const remaining_expected = if (total_expected_msgs > stats.total()) total_expected_msgs - stats.total() else 0;
+    const final_stats = drain.drainWithPatience(client, remaining_expected, 10000) catch types.ResponseStats{};
+    stats.add(final_stats);
 
-    while (timestamp.now() - drain_start < max_drain_time) {
-        const received = state.messages_received.load(.monotonic);
-        if (received >= expected_total) break;
-        std.Thread.sleep(100 * config.NS_PER_MS);
-    }
-
-    state.receiver_should_stop.store(true, .monotonic);
-    receiver.join();
-
-    const total_time = timestamp.now() - state.start_time;
+    const total_time = timestamp.now() - start_time;
 
     try helpers.print(stderr, "\n=== Final Results ===\n", .{});
     try helpers.printTime(stderr, "Total time:      ", total_time);
     if (total_time > 0) {
-        const trade_rate: u64 = pairs_sent * config.NS_PER_SEC / total_time;
+        const trade_rate = pairs_sent * config.NS_PER_SEC / total_time;
         try helpers.printThroughput(stderr, "Trades/sec:      ", trade_rate);
     }
 
-    const stats = state.getStats();
-    try stats.printValidation(orders_sent, pairs_sent, stderr);
+    try stats.printValidation(pairs_sent * 2, pairs_sent, stderr);
 
     try helpers.print(stderr, "\n[FLUSH] Cleaning up server state\n", .{});
     try client.sendFlush();
     std.Thread.sleep(500 * config.NS_PER_MS);
-}
-
-/// Sender thread that alternates between symbols to exercise both processors
-fn senderThreadDualProcessor(client: *EngineClient, state: *SharedState) void {
-    const target = state.target_trades;
-
-    // Symbols: IBM (A-M, processor 0) and TSLA (N-Z, processor 1)
-    const symbols = [_][]const u8{ "IBM", "TSLA" };
-
-    var i: u64 = 0;
-    while (i < target) : (i += 1) {
-        const symbol = symbols[i % 2]; // Alternate between processors
-        const price: u32 = 100 + @as(u32, @intCast(i % 50));
-        const buy_oid: u32 = @intCast((i * 2 + 1) % 0xFFFFFFFF);
-        const sell_oid: u32 = @intCast((i * 2 + 2) % 0xFFFFFFFF);
-
-        // Send buy (BUFFERED)
-        client.sendNewOrderBuffered(1, symbol, price, 10, .buy, buy_oid) catch {
-            _ = state.send_errors.fetchAdd(1, .monotonic);
-            continue;
-        };
-
-        // Send sell (BUFFERED)
-        client.sendNewOrderBuffered(1, symbol, price, 10, .sell, sell_oid) catch {
-            _ = state.send_errors.fetchAdd(1, .monotonic);
-            continue;
-        };
-
-        _ = state.pairs_sent.fetchAdd(1, .monotonic);
-
-        // Flush periodically
-        if ((i + 1) % FLUSH_BATCH_SIZE == 0) {
-            client.flush() catch {
-                _ = state.send_errors.fetchAdd(1, .monotonic);
-            };
-            _ = state.flushes.fetchAdd(1, .monotonic);
-        }
-    }
-
-    // Final flush
-    client.flush() catch {
-        _ = state.send_errors.fetchAdd(1, .monotonic);
-    };
-    _ = state.flushes.fetchAdd(1, .monotonic);
-
-    state.send_end_time = timestamp.now();
-    state.sender_done.store(true, .monotonic);
 }
 
 // ============================================================
