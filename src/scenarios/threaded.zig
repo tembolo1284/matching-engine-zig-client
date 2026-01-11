@@ -1,6 +1,4 @@
 //! Threaded Matching Scenarios with Buffered Interleaved I/O
-//!
-//! FIXED: Much more patient final drain - waits for ALL responses
 
 const std = @import("std");
 const config = @import("config.zig");
@@ -16,17 +14,23 @@ const binary = @import("../protocol/binary.zig");
 const proto_types = @import("../protocol/types.zig");
 
 // ============================================================
-// Configuration
+// Configuration - TUNED FOR BALANCED THROUGHPUT
 // ============================================================
 
 /// Number of order pairs per batch before draining
 const BATCH_SIZE: u64 = 200;
 
-/// Target drain percentage before sending next batch
-const DRAIN_TARGET_PCT: f64 = 0.5;
+/// Messages expected per trade pair (2 ACK + 1 Trade, TOB deferred)
+const MSGS_PER_PAIR: u64 = 3;
 
-/// Maximum empty polls before giving up on drain (per batch)
-const DRAIN_MAX_EMPTY: u32 = 50;
+/// Target drain percentage before sending next batch
+/// Higher = more balanced, slower send rate
+/// Lower = faster send, risk of server backup
+const DRAIN_TARGET_PCT: f64 = 0.7;
+
+/// Maximum time to wait for drain per batch (ms)
+/// This is the KEY fix - actually wait for responses!
+const DRAIN_BATCH_TIMEOUT_MS: u64 = 500;
 
 /// Poll timeout per drain attempt (ms)
 const DRAIN_POLL_MS: i32 = 1;
@@ -37,7 +41,7 @@ const DRAIN_POLL_MS: i32 = 1;
 
 pub fn runThreadedMatchingStress(client: *EngineClient, stderr: std.fs.File, trades: u64) !void {
     const orders = trades * 2;
-    const expected_msgs_per_pair: u64 = 3; // 2 ACK + 1 Trade
+    const expected_msgs_per_pair: u64 = MSGS_PER_PAIR;
     const total_expected_msgs = trades * expected_msgs_per_pair;
 
     // Header
@@ -91,20 +95,27 @@ pub fn runThreadedMatchingStress(client: *EngineClient, stderr: std.fs.File, tra
         pairs_sent += this_batch;
         batches_sent += 1;
 
-        // === DRAIN PHASE ===
+        // === DRAIN PHASE - Actually wait for responses! ===
         const expected_so_far = pairs_sent * expected_msgs_per_pair;
         const drain_target = @as(u64, @intFromFloat(@as(f64, @floatFromInt(expected_so_far)) * DRAIN_TARGET_PCT));
-        const need_to_drain = if (drain_target > stats.total()) drain_target - stats.total() else 0;
 
-        if (need_to_drain > 0) {
+        // Drain with timeout - keep trying until we hit target or timeout
+        const drain_deadline = timestamp.now() + DRAIN_BATCH_TIMEOUT_MS * config.NS_PER_MS;
+        
+        while (stats.total() < drain_target and timestamp.now() < drain_deadline) {
             const batch_stats = drain.drainBatch(
                 tcp_ptr,
                 proto,
-                need_to_drain,
-                DRAIN_MAX_EMPTY,
+                drain_target - stats.total(), // How many we still need
+                100,  // max_empty - more patient
                 DRAIN_POLL_MS,
-            ) catch types.ResponseStats{};
+            ) catch break;
             stats.add(batch_stats);
+            
+            // If we got nothing, small sleep to avoid busy spin
+            if (batch_stats.total() == 0) {
+                std.Thread.sleep(1 * config.NS_PER_MS);
+            }
         }
 
         // Progress reporting
@@ -135,48 +146,42 @@ pub fn runThreadedMatchingStress(client: *EngineClient, stderr: std.fs.File, tra
         try helpers.printThroughput(stderr, "Send rate:       ", send_rate);
     }
 
-    // === CRITICAL: PATIENT FINAL DRAIN ===
-    // Wait for ALL responses, not just a timeout
+    // === PATIENT FINAL DRAIN ===
     try helpers.print(stderr, "\n=== Final Drain (waiting for all responses) ===\n", .{});
     try helpers.print(stderr, "Already recv'd:  {d}\n", .{stats.total()});
     try helpers.print(stderr, "Expected total:  {d}\n", .{total_expected_msgs});
 
     const final_drain_start = timestamp.now();
-    
-    // Calculate timeout based on trades: 30 sec base + 1 sec per 1000 trades
-    // For 100K trades: 30 + 100 = 130 seconds max
-    const timeout_sec: u64 = 30 + (trades / 1000);
+
+    // Longer timeout: 60 sec base + 1 sec per 1000 trades
+    const timeout_sec: u64 = 60 + (trades / 1000);
     const timeout_ns = timeout_sec * config.NS_PER_SEC;
-    
+
     var last_received = stats.total();
     var stall_start = timestamp.now();
-    const max_stall_time = 10 * config.NS_PER_SEC; // Give up after 10 sec of no progress
+    const max_stall_time = 15 * config.NS_PER_SEC; // 15 sec stall tolerance
     var last_print_pct: u64 = (stats.total() * 100) / total_expected_msgs;
 
     while (stats.total() < total_expected_msgs) {
-        // Check total timeout
         if (timestamp.now() - final_drain_start > timeout_ns) {
             try helpers.print(stderr, "  Timeout after {d} seconds\n", .{timeout_sec});
             break;
         }
 
-        // Try to receive a batch
         const batch_stats = drain.drainBatch(
             tcp_ptr,
             proto,
-            1000, // Try to get up to 1000 at a time
-            200,  // More patience here
-            5,    // 5ms poll
+            1000,
+            500,  // Very patient - 500 empty polls
+            10,   // 10ms poll timeout
         ) catch break;
 
         stats.add(batch_stats);
 
-        // Check for progress
         if (stats.total() > last_received) {
             last_received = stats.total();
-            stall_start = timestamp.now(); // Reset stall timer
-            
-            // Print progress every 10%
+            stall_start = timestamp.now();
+
             const current_pct = (stats.total() * 100) / total_expected_msgs;
             if (current_pct >= last_print_pct + 10) {
                 try helpers.print(stderr, "  Draining: {d}% ({d}/{d})\n", .{
@@ -184,12 +189,9 @@ pub fn runThreadedMatchingStress(client: *EngineClient, stderr: std.fs.File, tra
                 });
                 last_print_pct = current_pct;
             }
-        } else {
-            // No progress - check stall timeout
-            if (timestamp.now() - stall_start > max_stall_time) {
-                try helpers.print(stderr, "  No progress for 10 seconds, stopping drain\n", .{});
-                break;
-            }
+        } else if (timestamp.now() - stall_start > max_stall_time) {
+            try helpers.print(stderr, "  No progress for 15 seconds, stopping drain\n", .{});
+            break;
         }
     }
 
@@ -220,7 +222,6 @@ pub fn runThreadedMatchingStress(client: *EngineClient, stderr: std.fs.File, tra
     try client.sendFlush();
     std.Thread.sleep(500 * config.NS_PER_MS);
 
-    // Final late arrivals
     const late = drain.drainAllAvailable(client) catch types.ResponseStats{};
     if (late.total() > 0) {
         try helpers.print(stderr, "Late arrivals:   {d}\n", .{late.total()});
@@ -233,7 +234,7 @@ pub fn runThreadedMatchingStress(client: *EngineClient, stderr: std.fs.File, tra
 
 pub fn runThreadedDualProcessorStress(client: *EngineClient, stderr: std.fs.File, trades: u64) !void {
     const orders = trades * 2;
-    const expected_msgs_per_pair: u64 = 3;
+    const expected_msgs_per_pair: u64 = MSGS_PER_PAIR;
     const total_expected_msgs = trades * expected_msgs_per_pair;
 
     try helpers.print(stderr, "=== DUAL-PROCESSOR BUFFERED INTERLEAVED: {d} Trades ===\n\n", .{trades});
@@ -276,13 +277,17 @@ pub fn runThreadedDualProcessorStress(client: *EngineClient, stderr: std.fs.File
         pairs_sent += this_batch;
         batches_sent += 1;
 
+        // Drain with timeout
         const expected_so_far = pairs_sent * expected_msgs_per_pair;
         const drain_target = @as(u64, @intFromFloat(@as(f64, @floatFromInt(expected_so_far)) * DRAIN_TARGET_PCT));
-        const need_to_drain = if (drain_target > stats.total()) drain_target - stats.total() else 0;
+        const drain_deadline = timestamp.now() + DRAIN_BATCH_TIMEOUT_MS * config.NS_PER_MS;
 
-        if (need_to_drain > 0) {
-            const batch_stats = drain.drainBatch(tcp_ptr, proto, need_to_drain, DRAIN_MAX_EMPTY, DRAIN_POLL_MS) catch types.ResponseStats{};
+        while (stats.total() < drain_target and timestamp.now() < drain_deadline) {
+            const batch_stats = drain.drainBatch(tcp_ptr, proto, drain_target - stats.total(), 100, DRAIN_POLL_MS) catch break;
             stats.add(batch_stats);
+            if (batch_stats.total() == 0) {
+                std.Thread.sleep(1 * config.NS_PER_MS);
+            }
         }
 
         if (pairs_sent >= last_progress + progress_interval) {
@@ -303,18 +308,17 @@ pub fn runThreadedDualProcessorStress(client: *EngineClient, stderr: std.fs.File
 
     // Patient final drain
     try helpers.print(stderr, "\n=== Final Drain ===\n", .{});
-    
-    const timeout_sec: u64 = 30 + (trades / 1000);
+    const timeout_sec: u64 = 60 + (trades / 1000);
     const timeout_ns = timeout_sec * config.NS_PER_SEC;
     const final_drain_start = timestamp.now();
     var last_received = stats.total();
     var stall_start = timestamp.now();
-    const max_stall_time = 10 * config.NS_PER_SEC;
+    const max_stall_time = 15 * config.NS_PER_SEC;
 
     while (stats.total() < total_expected_msgs) {
         if (timestamp.now() - final_drain_start > timeout_ns) break;
 
-        const batch_stats = drain.drainBatch(tcp_ptr, proto, 1000, 200, 5) catch break;
+        const batch_stats = drain.drainBatch(tcp_ptr, proto, 1000, 500, 10) catch break;
         stats.add(batch_stats);
 
         if (stats.total() > last_received) {
