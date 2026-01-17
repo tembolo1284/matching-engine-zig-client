@@ -109,18 +109,15 @@ pub fn formatNewOrder(
 pub fn formatCancel(
     buf: []u8,
     user_id: u32,
-    symbol: []const u8,
     order_id: u32,
 ) ParseError![]const u8 {
     std.debug.assert(buf.len > 0);
-    std.debug.assert(symbol.len > 0);
 
     var stream = std.io.fixedBufferStream(buf);
     const writer = stream.writer();
 
-    writer.print("C, {d}, {s}, {d}\n", .{
+    writer.print("C, {d}, {d}\n", .{
         user_id,
-        symbol,
         order_id,
     }) catch return ParseError.BufferTooSmall;
 
@@ -432,8 +429,8 @@ test "format new order" {
 
 test "format cancel" {
     var buf: [256]u8 = undefined;
-    const result = try formatCancel(&buf, 42, "AAPL", 1001);
-    try std.testing.expectEqualStrings("C, 42, AAPL, 1001\n", result);
+    const result = try formatCancel(&buf, 42, 1001);
+    try std.testing.expectEqualStrings("C, 42, 1001\n", result);
 }
 
 test "format flush" {

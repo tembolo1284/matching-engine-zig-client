@@ -218,7 +218,7 @@ pub const EngineClient = struct {
     }
 
     fn probeBinary(self: *Self) Protocol {
-        const probe_cancel = types.BinaryCancel.init(1, PROBE_SYMBOL, PROBE_ORDER_ID_BINARY);
+        const probe_cancel = types.BinaryCancel.init(1, PROBE_ORDER_ID_BINARY);
         self.tcp_client.?.send(probe_cancel.asBytes()) catch return .csv;
 
         std.Thread.sleep(PROTOCOL_DETECT_TIMEOUT_MS * NS_PER_MS);

@@ -256,19 +256,15 @@ pub const BinaryCancel = extern struct {
         }
     }
 
-    pub fn init(user_id: u32, symbol: []const u8, order_id: u32) BinaryCancel {
-        std.debug.assert(symbol.len > 0);
-
-        var sym: [MAX_SYMBOL_LEN]u8 = .{0} ** MAX_SYMBOL_LEN;
-        copySymbol(&sym, symbol);
-
+    pub fn init(user_id: u32, order_id: u32) BinaryCancel {
+        
         return .{
             .user_id = std.mem.nativeToBig(u32, user_id),
             .user_order_id = std.mem.nativeToBig(u32, order_id),
         };
     }
 
-    pub fn asBytes(self: *const BinaryCancel) *const [18]u8 {
+    pub fn asBytes(self: *const BinaryCancel) *const [10]u8 {
         return @ptrCast(self);
     }
 

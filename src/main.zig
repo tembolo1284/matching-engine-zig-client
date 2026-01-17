@@ -327,7 +327,7 @@ fn runInteractive(args: Args) !void {
         } else if (std.mem.startsWith(u8, trimmed, "cancel ")) {
             if (parseCancel(trimmed[7..])) |parsed| {
                 try print(stderr, "→ CANCEL {s} order {d}\n", .{ parsed.symbol, parsed.order_id });
-                client.sendCancel(1, parsed.symbol, parsed.order_id) catch |err| {
+                client.sendCancel(1, parsed.order_id) catch |err| {
                     try print(stderr, "Send error: {s}\n", .{@errorName(err)});
                     continue;
                 };
