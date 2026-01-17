@@ -15,7 +15,7 @@ QUIET_FLAG := $(if $(filter 1,$(QUIET)),--quiet,)
         run-tcp run-tcp-csv run-udp run-udp-csv \
         scenario-1 scenario-2 scenario-3 \
         stress-1k stress-10k stress-100k \
-        match-1k match-10k match-100k match-250k match-500k match-1m \
+        match-1k match-10k match-100k match-250k match-500k match-250m \
         dual-500k dual-1m dual-100m \
         test check fmt
 
@@ -85,34 +85,34 @@ stress-100k: build
 	$(BINARY) --tcp --binary $(QUIET_FLAG) $(HOST) $(PORT) 12
 
 # ============================================================================
-# BUFFERED Matching (40-45) - Uses threaded.zig with write buffering
+# Matching Stress (20-25) - Adaptive Pacing (Single Processor - IBM)
 # ============================================================================
 
 match-1k: build
-	@echo "=== 1K Trades (2K orders) - BUFFERED ==="
-	$(BINARY) --tcp --binary $(QUIET_FLAG) $(HOST) $(PORT) 40
+	@echo "=== 1K Trades (2K orders) ==="
+	$(BINARY) --tcp --binary $(QUIET_FLAG) $(HOST) $(PORT) 20
 
 match-10k: build
-	@echo "=== 10K Trades (20K orders) - BUFFERED ==="
-	$(BINARY) --tcp --binary $(QUIET_FLAG) $(HOST) $(PORT) 41
+	@echo "=== 10K Trades (20K orders) ==="
+	$(BINARY) --tcp --binary $(QUIET_FLAG) $(HOST) $(PORT) 21
 
 match-100k: build
-	@echo "=== 100K Trades (200K orders) - BUFFERED ==="
-	$(BINARY) --tcp --binary $(QUIET_FLAG) $(HOST) $(PORT) 42
+	@echo "=== 100K Trades (200K orders) ==="
+	$(BINARY) --tcp --binary $(QUIET_FLAG) $(HOST) $(PORT) 22
 
 match-250k: build
-	@echo "=== 250K Trades (500K orders) - BUFFERED ==="
-	$(BINARY) --tcp --binary $(QUIET_FLAG) $(HOST) $(PORT) 43
+	@echo "=== 250K Trades (500K orders) ==="
+	$(BINARY) --tcp --binary $(QUIET_FLAG) $(HOST) $(PORT) 23
 
 match-500k: build
-	@echo "=== 500K Trades (1M orders) - BUFFERED ==="
-	$(BINARY) --tcp --binary $(QUIET_FLAG) $(HOST) $(PORT) 44
+	@echo "=== 500K Trades (1M orders) ==="
+	$(BINARY) --tcp --binary $(QUIET_FLAG) $(HOST) $(PORT) 24
 
-match-1m: build
+match-250m: build
 	@echo ""
-	@echo "★★★ BEAST MODE: 1M Trades (2M orders) - BUFFERED ★★★"
+	@echo "★★★ LEGENDARY: 250M Trades (500M orders) ★★★"
 	@echo ""
-	$(BINARY) --tcp --binary $(QUIET_FLAG) $(HOST) $(PORT) 45
+	$(BINARY) --tcp --binary $(QUIET_FLAG) $(HOST) $(PORT) 25
 
 # ============================================================================
 # Dual-Processor Matching (30-32) - IBM + NVDA
@@ -121,36 +121,36 @@ match-1m: build
 dual-500k: build
 	@echo "=== 500K Trades (1M orders) - Dual Processor ==="
 	@echo "    IBM (Proc 0): 250K | NVDA (Proc 1): 250K"
-	$(BINARY) --tcp --binary --quiet $(HOST) $(PORT) 30
+	$(BINARY) --tcp --binary $(QUIET_FLAG) $(HOST) $(PORT) 30
 
 dual-1m: build
 	@echo "=== 1M Trades (2M orders) - Dual Processor ==="
 	@echo "    IBM (Proc 0): 500K | NVDA (Proc 1): 500K"
-	$(BINARY) --tcp --binary --quiet $(HOST) $(PORT) 31
+	$(BINARY) --tcp --binary $(QUIET_FLAG) $(HOST) $(PORT) 31
 
 dual-100m: build
 	@echo ""
 	@echo "★★★ ULTIMATE: 100M Trades (200M orders) - Dual Processor ★★★"
 	@echo "    IBM (Proc 0): 50M | NVDA (Proc 1): 50M"
 	@echo ""
-	$(BINARY) --tcp --binary --quiet $(HOST) $(PORT) 32
+	$(BINARY) --tcp --binary $(QUIET_FLAG) $(HOST) $(PORT) 32
 
 # ============================================================================
 # Benchmarking
 # ============================================================================
 
 bench: build
-	@echo "=== Quick Benchmark (Buffered) ==="
-	@$(BINARY) --tcp --binary --quiet $(HOST) $(PORT) 40
-	@$(BINARY) --tcp --binary --quiet $(HOST) $(PORT) 41
+	@echo "=== Quick Benchmark ==="
+	@$(BINARY) --tcp --binary --quiet $(HOST) $(PORT) 20
+	@$(BINARY) --tcp --binary --quiet $(HOST) $(PORT) 21
 
 bench-full: build
 	@echo "=== Full Benchmark Suite ==="
-	@echo "--- Buffered Single Processor ---"
-	@$(BINARY) --tcp --binary --quiet $(HOST) $(PORT) 40
-	@$(BINARY) --tcp --binary --quiet $(HOST) $(PORT) 41
-	@$(BINARY) --tcp --binary --quiet $(HOST) $(PORT) 42
-	@echo "--- Dual Processor ---"
+	@echo "--- Single Processor (IBM) ---"
+	@$(BINARY) --tcp --binary --quiet $(HOST) $(PORT) 20
+	@$(BINARY) --tcp --binary --quiet $(HOST) $(PORT) 21
+	@$(BINARY) --tcp --binary --quiet $(HOST) $(PORT) 22
+	@echo "--- Dual Processor (IBM + NVDA) ---"
 	@$(BINARY) --tcp --binary --quiet $(HOST) $(PORT) 30
 
 # ============================================================================
@@ -181,15 +181,23 @@ help:
 	@echo "  make clean    Remove artifacts"
 	@echo "  make rebuild  Clean + build"
 	@echo ""
-	@echo "Basic: scenario-1, scenario-2, scenario-3"
+	@echo "Basic Scenarios:"
+	@echo "  make scenario-1    Simple orders (no match)"
+	@echo "  make scenario-2    Matching trade"
+	@echo "  make scenario-3    Cancel order"
 	@echo ""
-	@echo "BUFFERED Matching (threaded send/recv):"
+	@echo "Unmatched Stress:"
+	@echo "  make stress-1k     1K orders"
+	@echo "  make stress-10k    10K orders"
+	@echo "  make stress-100k   100K orders"
+	@echo ""
+	@echo "Matching Stress (Single Processor - IBM):"
 	@echo "  make match-1k      1K trades"
 	@echo "  make match-10k     10K trades"
 	@echo "  make match-100k    100K trades"
 	@echo "  make match-250k    250K trades"
 	@echo "  make match-500k    500K trades"
-	@echo "  make match-1m      1M trades    ★★★ BEAST MODE ★★★"
+	@echo "  make match-250m    250M trades  ★★★ LEGENDARY ★★★"
 	@echo ""
 	@echo "Dual-Processor Matching (IBM + NVDA):"
 	@echo "  make dual-500k     500K trades  (250K each)"
@@ -197,10 +205,10 @@ help:
 	@echo "  make dual-100m     100M trades  (50M each) ★★★ ULTIMATE ★★★"
 	@echo ""
 	@echo "Benchmarking:"
-	@echo "  make bench       Quick (1K, 10K)"
-	@echo "  make bench-full  Full suite"
+	@echo "  make bench         Quick (1K, 10K)"
+	@echo "  make bench-full    Full suite"
 	@echo ""
 	@echo "Examples:"
 	@echo "  make match-100k"
 	@echo "  make dual-1m"
-	@echo "  make run-tcp SCENARIO=42"
+	@echo "  make run-tcp SCENARIO=22"
