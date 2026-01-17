@@ -3,12 +3,10 @@
 //! Functions for draining responses from the server.
 //! These are the most performance-sensitive functions and
 //! the most likely to need tuning.
-
 const std = @import("std");
 const config = @import("config.zig");
 const types = @import("types.zig");
 const helpers = @import("helpers.zig");
-
 const EngineClient = @import("../client/engine_client.zig").EngineClient;
 const Protocol = @import("../client/engine_client.zig").Protocol;
 const TcpClient = @import("../transport/tcp.zig").TcpClient;
@@ -61,7 +59,6 @@ pub fn drainWithPatience(client: *EngineClient, expected_count: u64, timeout_ms:
     if (client.tcp_client) |*tcp_client| {
         const start_time = timestamp.now();
         const timeout_ns = timeout_ms * config.NS_PER_MS;
-
         var consecutive_empty: u32 = 0;
 
         while (stats.total() < expected_count) {
@@ -93,6 +90,75 @@ pub fn drainWithPatience(client: *EngineClient, expected_count: u64, timeout_ms:
     }
 
     return stats;
+}
+
+// ============================================================
+// Adaptive Drain (Stall-based timeout)
+// ============================================================
+
+/// Drain until target trade count reached or stalled too long.
+/// This is the key to adaptive pacing - wait for actual results, not arbitrary timeouts.
+/// Only gives up after max_stall_ms of NO NEW TRADES (not just no data).
+pub fn drainUntilTrades(
+    client: *EngineClient,
+    stats: *types.ResponseStats,
+    target_trades: u64,
+    max_stall_ms: u64,
+) !void {
+    const proto = client.getProtocol();
+    const tcp_client = &(client.tcp_client orelse return);
+
+    var last_trade_count: u64 = stats.trades;
+    var stall_start: u64 = 0;
+    var stalling = false;
+
+    while (stats.trades < target_trades) {
+        const maybe_data = tcp_client.tryRecv(20) catch |err| {
+            if (err == error.WouldBlock or err == error.Timeout) {
+                // No data - check stall
+                if (stats.trades != last_trade_count) {
+                    // Got new trades since last check, reset
+                    last_trade_count = stats.trades;
+                    stalling = false;
+                } else if (!stalling) {
+                    // Start stall timer
+                    stalling = true;
+                    stall_start = timestamp.now();
+                } else {
+                    // Check if stalled too long
+                    const stall_ns = timestamp.now() - stall_start;
+                    if (stall_ns > max_stall_ms * config.NS_PER_MS) {
+                        break; // Stalled too long
+                    }
+                    std.Thread.sleep(5 * config.NS_PER_MS);
+                }
+                continue;
+            }
+            return err;
+        };
+
+        if (maybe_data) |raw_data| {
+            if (helpers.parseMessage(raw_data, proto)) |m| {
+                helpers.countMessage(stats, m);
+            }
+            stalling = false;
+        } else {
+            // Same stall logic as timeout case
+            if (stats.trades != last_trade_count) {
+                last_trade_count = stats.trades;
+                stalling = false;
+            } else if (!stalling) {
+                stalling = true;
+                stall_start = timestamp.now();
+            } else {
+                const stall_ns = timestamp.now() - stall_start;
+                if (stall_ns > max_stall_ms * config.NS_PER_MS) {
+                    break;
+                }
+                std.Thread.sleep(5 * config.NS_PER_MS);
+            }
+        }
+    }
 }
 
 // ============================================================

@@ -1,19 +1,30 @@
 //! Matching Stress Scenarios (20-25)
 //!
 //! Send buy/sell pairs at the same price to generate trades.
-//! Single processor (IBM symbol routes to processor 0).
-
+//! Uses adaptive pacing to prevent TCP buffer overflow.
 const std = @import("std");
 const config = @import("config.zig");
 const types = @import("types.zig");
 const helpers = @import("helpers.zig");
 const drain = @import("drain.zig");
-
 const EngineClient = @import("../client/engine_client.zig").EngineClient;
 const timestamp = @import("../util/timestamp.zig");
 
 // ============================================================
-// Matching Stress Test (Single Processor)
+// Adaptive Pacing Parameters (match C client)
+// ============================================================
+
+/// Maximum trades we can fall behind before pausing to catch up
+const MAX_DEFICIT: u64 = 5000;
+
+/// Drain until only this far behind before resuming sends
+const CATCHUP_TARGET: u64 = 1000;
+
+/// Final drain stall timeout (60 seconds - be very patient)
+const FINAL_DRAIN_STALL_MS: u64 = 60000;
+
+// ============================================================
+// Matching Stress Test (Single Processor) - ADAPTIVE PACING
 // ============================================================
 
 pub fn runMatchingStress(client: *EngineClient, stderr: std.fs.File, trades: u64) !void {
@@ -23,16 +34,15 @@ pub fn runMatchingStress(client: *EngineClient, stderr: std.fs.File, trades: u64
     if (trades >= 100_000_000) {
         try printLegendaryHeader(stderr, trades, orders);
     } else {
-        try helpers.print(stderr, "=== Matching Stress: {d} Trades ===\n\n", .{trades});
+        try helpers.print(stderr, "=== Matching Stress Test: {d} Trade Pairs ===\n\n", .{trades});
     }
 
-    // Target info
-    try printTarget(stderr, trades, orders);
+    try helpers.print(stderr, "Sending {d} buy/sell pairs (should generate {d} trades)...\n\n", .{ trades, trades });
 
     // Initial flush
     try client.sendFlush();
     std.Thread.sleep(200 * config.NS_PER_MS);
-    
+
     // Clear any stale data
     if (client.tcp_client) |*tcp| {
         var cleared: u32 = 0;
@@ -42,55 +52,71 @@ pub fn runMatchingStress(client: *EngineClient, stderr: std.fs.File, trades: u64
         }
     }
 
-    // Interleaved mode: send small batch, drain, repeat
-    const batch_size: u64 = 10; // Very small batches for reliability
-    try helpers.print(stderr, "Interleaved mode: {d} pairs/batch, drain after each\n\n", .{batch_size});
-
+    var running_stats = types.ResponseStats{};
     var send_errors: u64 = 0;
     var pairs_sent: u64 = 0;
-    var running_stats = types.ResponseStats{};
 
-    const progress_points = [_]u64{ 25, 50, 75 };
-    var next_progress_idx: usize = 0;
+    // Progress tracking
+    const progress_interval: u64 = if (trades >= 20) trades / 20 else 1;
+    var last_progress: u64 = 0;
 
     const start_time = timestamp.now();
 
-    // Send phase with interleaved drain
+    // Send phase with adaptive pacing
     var i: u64 = 0;
     while (i < trades) : (i += 1) {
         const price: u32 = 100 + @as(u32, @intCast(i % 50));
         const buy_oid: u32 = @intCast((i * 2 + 1) % 0xFFFFFFFF);
         const sell_oid: u32 = @intCast((i * 2 + 2) % 0xFFFFFFFF);
 
+        // Send buy
         client.sendNewOrder(1, "IBM", price, 10, .buy, buy_oid) catch {
             send_errors += 1;
             continue;
         };
+
+        // Quick non-blocking receive
+        const quick1 = drain.drainAllAvailable(client) catch types.ResponseStats{};
+        running_stats.add(quick1);
+
+        // Send matching sell
         client.sendNewOrder(1, "IBM", price, 10, .sell, sell_oid) catch {
             send_errors += 1;
             continue;
         };
+
+        // Quick non-blocking receive
+        const quick2 = drain.drainAllAvailable(client) catch types.ResponseStats{};
+        running_stats.add(quick2);
+
         pairs_sent += 1;
 
-        // After each batch, drain responses
-        if (pairs_sent % batch_size == 0) {
-            // Drain with short timeout - get what's ready
-            const batch_stats = try drainQuick(client, batch_size * 5, 5); // expect ~50 msgs, 5ms timeout each
-            running_stats.add(batch_stats);
+        // ADAPTIVE PACING: If falling too far behind on trades, pause and drain
+        const expected_trades = pairs_sent; // 1 trade per pair
+        if (expected_trades > running_stats.trades + MAX_DEFICIT) {
+            // We're too far behind - drain until caught up
+            const target = expected_trades - CATCHUP_TARGET;
+            try drain.drainUntilTrades(client, &running_stats, target, 5000); // 5 sec max stall
         }
 
-        // Progress at 25%, 50%, 75%
-        if (!config.quiet and next_progress_idx < progress_points.len) {
-            const target_pct = progress_points[next_progress_idx];
-            const current_pct = (i * 100) / trades;
-            if (current_pct >= target_pct) {
-                const elapsed_ms = (timestamp.now() - start_time) / config.NS_PER_MS;
-                const rate: u64 = if (elapsed_ms > 0) pairs_sent * 1000 / elapsed_ms else 0;
-                try helpers.print(stderr, "  {d}% | {d} pairs | {d} recv'd | {d} trades/sec\n", .{
-                    target_pct, pairs_sent, running_stats.total(), rate,
-                });
-                next_progress_idx += 1;
-            }
+        // Progress indicator (every 5%)
+        if (i > 0 and i / progress_interval > last_progress) {
+            last_progress = i / progress_interval;
+            const pct: u64 = (i * 100) / trades;
+            const elapsed_ns = timestamp.now() - start_time;
+            const elapsed_ms = elapsed_ns / config.NS_PER_MS;
+            const orders_sent_so_far = i * 2;
+            const rate: u64 = if (elapsed_ms > 0) orders_sent_so_far * 1000 / elapsed_ms else 0;
+            const deficit = pairs_sent - running_stats.trades;
+
+            try helpers.print(stderr, "  {d}% | {d} pairs | {d}ms | {d}/s | {d} trades | deficit {d}\n", .{
+                pct,
+                i,
+                elapsed_ms,
+                rate,
+                running_stats.trades,
+                deficit,
+            });
         }
     }
 
@@ -102,119 +128,75 @@ pub fn runMatchingStress(client: *EngineClient, stderr: std.fs.File, trades: u64
     try helpers.print(stderr, "\n=== Send Phase Complete ===\n", .{});
     try helpers.print(stderr, "Trade pairs:     {d}\n", .{pairs_sent});
     try helpers.print(stderr, "Orders sent:     {d}\n", .{orders_sent});
-    try helpers.print(stderr, "Send errors:     {d}\n", .{send_errors});
+    if (send_errors > 0) {
+        try helpers.print(stderr, "Send errors:     {d}\n", .{send_errors});
+    }
     try helpers.printTime(stderr, "Send time:       ", send_time);
     if (send_time > 0) {
-        const send_rate: u64 = pairs_sent * config.NS_PER_SEC / send_time;
+        const send_rate: u64 = orders_sent * config.NS_PER_SEC / send_time;
         try helpers.printThroughput(stderr, "Send rate:       ", send_rate);
     }
+    try helpers.print(stderr, "Trades so far:   {d}\n", .{running_stats.trades});
 
-    // Final drain - collect any remaining
-    const expected_total = orders_sent + pairs_sent + orders_sent; // ACKs + Trades + TOB
-    const already_received = running_stats.total();
+    // Final drain - keep going until all trades received or stalled
+    try helpers.print(stderr, "\nDraining remaining responses...\n", .{});
+    const remaining = pairs_sent - running_stats.trades;
+    try helpers.print(stderr, "  [sent {d} pairs, have {d} trades, need {d} more]\n", .{
+        pairs_sent,
+        running_stats.trades,
+        remaining,
+    });
 
-    if (already_received < expected_total) {
-        try helpers.print(stderr, "\n=== Drain Phase ===\n", .{});
-        try helpers.print(stderr, "Already recv'd:  {d}\n", .{already_received});
-        try helpers.print(stderr, "Expected total:  {d}\n", .{expected_total});
+    // Use the stall-based drain - wait up to 60 seconds of no progress
+    try drain.drainUntilTrades(client, &running_stats, pairs_sent, FINAL_DRAIN_STALL_MS);
 
-        const drain_start = timestamp.now();
-        const final_stats = try drain.drainWithPatience(client, expected_total - already_received, config.DEFAULT_DRAIN_TIMEOUT_MS);
-        running_stats.add(final_stats);
-        const drain_time = timestamp.now() - drain_start;
-
-        try helpers.print(stderr, "Drain recv'd:    {d}\n", .{final_stats.total()});
-        try helpers.printTime(stderr, "Drain time:      ", drain_time);
+    // Report final status if still short
+    if (running_stats.trades < pairs_sent) {
+        try helpers.print(stderr, "  [final: {d}/{d} trades]\n", .{ running_stats.trades, pairs_sent });
     }
 
     // Final results
     const total_time = timestamp.now() - start_time;
+    try helpers.print(stderr, "\n=== Scenario Results ===\n\n", .{});
 
-    try helpers.print(stderr, "\n=== Final Results ===\n", .{});
-    try helpers.printTime(stderr, "Total time:      ", total_time);
+    try helpers.print(stderr, "Orders:\n", .{});
+    try helpers.print(stderr, "  Sent:              {d}\n", .{orders_sent});
+    try helpers.print(stderr, "  Failed:            {d}\n", .{send_errors});
+    try helpers.print(stderr, "  Responses:         {d}\n", .{running_stats.total()});
+    try helpers.print(stderr, "  Trades:            {d}\n", .{running_stats.trades});
+    try helpers.print(stderr, "\n", .{});
+
+    try helpers.printTime(stderr, "Time:                ", total_time);
+    try helpers.print(stderr, "\n", .{});
+
+    try helpers.print(stderr, "Throughput:\n", .{});
     if (total_time > 0) {
-        const trade_rate: u64 = pairs_sent * config.NS_PER_SEC / total_time;
-        try helpers.printThroughput(stderr, "Trades/sec:      ", trade_rate);
+        const orders_per_sec: u64 = orders_sent * config.NS_PER_SEC / total_time;
+        try helpers.printThroughput(stderr, "  Orders/sec:        ", orders_per_sec);
     }
 
-    try running_stats.printValidation(orders_sent, pairs_sent, stderr);
+    // Validation
+    try helpers.print(stderr, "\n", .{});
+    if (running_stats.trades != pairs_sent) {
+        try helpers.print(stderr, "⚠ WARNING: Expected {d} trades, got {d} ({d}.{d}%)\n\n", .{
+            pairs_sent,
+            running_stats.trades,
+            (running_stats.trades * 100) / pairs_sent,
+            ((running_stats.trades * 1000) / pairs_sent) % 10,
+        });
+    } else {
+        try helpers.print(stderr, "✓ All {d} trades executed successfully!\n\n", .{pairs_sent});
+    }
 
     // Achievement
     if (trades >= 100_000_000 and running_stats.trades >= pairs_sent) {
         try printLegendaryAchievement(stderr);
     }
-
-    // Cleanup
-    try helpers.print(stderr, "\n[FLUSH] Cleaning up server state\n", .{});
-    try client.sendFlush();
-    
-    // Give server time to process flush and send any remaining responses
-    std.Thread.sleep(100 * config.NS_PER_MS);
-    
-    // Final aggressive drain to catch any stragglers
-    const stragglers = try drainQuick(client, 1000, 10);
-    if (stragglers.total() > 0) {
-        running_stats.add(stragglers);
-        try helpers.print(stderr, "Late arrivals:   {d}\n", .{stragglers.total()});
-    }
-    
-    std.Thread.sleep(100 * config.NS_PER_MS);
-}
-
-// ============================================================
-// Quick Drain Helper
-// ============================================================
-
-/// Drain up to max_msgs with poll_ms timeout per recv
-fn drainQuick(client: *EngineClient, max_msgs: u64, poll_ms: i32) !types.ResponseStats {
-    var stats = types.ResponseStats{};
-    const proto = client.getProtocol();
-
-    if (client.tcp_client) |*tcp_client| {
-        var received: u64 = 0;
-        var consecutive_empty: u32 = 0;
-        const max_empty: u32 = 10; // Give up after 10 empty polls (50ms at 5ms each)
-
-        while (received < max_msgs and consecutive_empty < max_empty) {
-            const maybe_data = tcp_client.tryRecv(poll_ms) catch |err| {
-                if (err == error.WouldBlock or err == error.Timeout) {
-                    consecutive_empty += 1;
-                    continue;
-                }
-                return err;
-            };
-
-            if (maybe_data) |raw_data| {
-                if (helpers.parseMessage(raw_data, proto)) |m| {
-                    helpers.countMessage(&stats, m);
-                    received += 1;
-                    consecutive_empty = 0;
-                }
-            } else {
-                consecutive_empty += 1;
-            }
-        }
-    } else {
-        // Debug: no tcp_client!
-        // helpers.print(stderr, "[DEBUG] drainQuick: no tcp_client!\n", .{}) catch {};
-    }
-
-    return stats;
 }
 
 // ============================================================
 // Display Helpers
 // ============================================================
-
-fn printTarget(stderr: std.fs.File, trades: u64, orders: u64) !void {
-    if (trades >= 1_000_000) {
-        try helpers.print(stderr, "Target: {d}M trades ({d}M orders)\n", .{ trades / 1_000_000, orders / 1_000_000 });
-    } else if (trades >= 1_000) {
-        try helpers.print(stderr, "Target: {d}K trades ({d}K orders)\n", .{ trades / 1_000, orders / 1_000 });
-    } else {
-        try helpers.print(stderr, "Target: {d} trades ({d} orders)\n", .{ trades, orders });
-    }
-}
 
 fn printLegendaryHeader(stderr: std.fs.File, trades: u64, orders: u64) !void {
     try stderr.writeAll("\n");
