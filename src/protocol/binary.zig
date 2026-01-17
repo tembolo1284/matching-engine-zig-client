@@ -242,16 +242,13 @@ pub fn encodeNewOrder(
 pub fn encodeCancel(
     buf: []u8,
     user_id: u32,
-    symbol: []const u8,
     order_id: u32,
 ) EncodeError![]const u8 {
     const msg_size = @sizeOf(types.BinaryCancel);
 
-    std.debug.assert(symbol.len > 0);
-
     if (buf.len < msg_size) return EncodeError.BufferTooSmall;
 
-    const cancel = types.BinaryCancel.init(user_id, symbol, order_id);
+    const cancel = types.BinaryCancel.init(user_id, order_id);
 
     @memcpy(buf[0..msg_size], cancel.asSlice());
 

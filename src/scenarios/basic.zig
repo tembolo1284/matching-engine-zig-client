@@ -82,7 +82,7 @@ pub fn runScenario3(client: *EngineClient, stderr: std.fs.File) !void {
 
     // Cancel order 1
     try helpers.print(stderr, "[SEND] C, IBM, 1, 1 (Cancel order 1)\n", .{});
-    try client.sendCancel(1, "IBM", 1);
+    try client.sendCancel(1, 1);
     try drain.recvAndPrint(client, stderr, 5);
 
     // Flush - need extra patience for final TOB

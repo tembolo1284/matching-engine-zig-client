@@ -340,17 +340,17 @@ pub const EngineClient = struct {
     }
 
     /// Send a cancel order request (BUFFERED).
-    pub fn sendCancelBuffered(self: *Self, user_id: u32, symbol: []const u8, order_id: u32) !void {
-        std.debug.assert(symbol.len > 0 and symbol.len <= types.MAX_SYMBOL_LEN);
+    pub fn sendCancelBuffered(self: *Self, user_id: u32, order_id: u32) !void {
+        
         std.debug.assert(self.isConnected());
 
         const data = switch (self.detected_protocol) {
             .binary => blk: {
-                const msg = types.BinaryCancel.init(user_id, symbol, order_id);
+                const msg = types.BinaryCancel.init(user_id, order_id);
                 break :blk msg.asBytes();
             },
             .csv, .auto => blk: {
-                const result = try csv.formatCancel(&self.send_buf, user_id, symbol, order_id);
+                const result = try csv.formatCancel(&self.send_buf, user_id, order_id);
                 break :blk result;
             },
         };
@@ -451,17 +451,17 @@ pub const EngineClient = struct {
     }
 
     /// Send a cancel order request (UNBUFFERED).
-    pub fn sendCancel(self: *Self, user_id: u32, symbol: []const u8, order_id: u32) !void {
-        std.debug.assert(symbol.len > 0 and symbol.len <= types.MAX_SYMBOL_LEN);
+    pub fn sendCancel(self: *Self, user_id: u32, order_id: u32) !void {
+        
         std.debug.assert(self.isConnected());
 
         const data = switch (self.detected_protocol) {
             .binary => blk: {
-                const msg = types.BinaryCancel.init(user_id, symbol, order_id);
+                const msg = types.BinaryCancel.init(user_id, order_id);
                 break :blk msg.asBytes();
             },
             .csv, .auto => blk: {
-                const result = try csv.formatCancel(&self.send_buf, user_id, symbol, order_id);
+                const result = try csv.formatCancel(&self.send_buf, user_id, order_id);
                 break :blk result;
             },
         };

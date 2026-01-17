@@ -247,13 +247,12 @@ pub const BinaryCancel = extern struct {
     magic: u8 = MAGIC_BYTE,
     msg_type: u8 = @intFromEnum(InputMsgType.cancel),
     user_id: u32 align(1),
-    symbol: [MAX_SYMBOL_LEN]u8,
     user_order_id: u32 align(1),
-    // NO PADDING - must match server's 18-byte wire format exactly
+    // NO PADDING - must match server's 10-byte wire format exactly
 
     comptime {
-        if (@sizeOf(BinaryCancel) != 18) {
-            @compileError("BinaryCancel must be exactly 18 bytes to match server");
+        if (@sizeOf(BinaryCancel) != 10) {
+            @compileError("BinaryCancel must be exactly 10 bytes to match server");
         }
     }
 
@@ -265,7 +264,6 @@ pub const BinaryCancel = extern struct {
 
         return .{
             .user_id = std.mem.nativeToBig(u32, user_id),
-            .symbol = sym,
             .user_order_id = std.mem.nativeToBig(u32, order_id),
         };
     }
@@ -388,11 +386,10 @@ pub const BinaryTopOfBook = extern struct {
     side: u8,
     price: u32 align(1),
     quantity: u32 align(1),
-    _pad: u8 = 0,
 
     comptime {
-        if (@sizeOf(BinaryTopOfBook) != 20) {
-            @compileError("BinaryTopOfBook must be exactly 20 bytes");
+        if (@sizeOf(BinaryTopOfBook) != 19) {
+            @compileError("BinaryTopOfBook must be exactly 19 bytes");
         }
     }
 
