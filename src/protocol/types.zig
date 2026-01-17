@@ -589,17 +589,14 @@ test "BinaryNewOrder layout and encoding" {
 }
 
 test "BinaryCancel layout" {
-    const cancel = BinaryCancel.init(42, "AAPL", 1001);
+    const cancel = BinaryCancel.init(42, 1001);
     const bytes = cancel.asSlice();
 
     try std.testing.expectEqual(@as(u8, MAGIC_BYTE), bytes[0]);
     try std.testing.expectEqual(@as(u8, 'C'), bytes[1]);
     
     // Verify size matches server's wire format
-    try std.testing.expectEqual(@as(usize, 18), bytes.len);
-
-    // Verify symbol (starts at offset 6)
-    try std.testing.expectEqualStrings("AAPL", bytes[6..10]);
+    try std.testing.expectEqual(@as(usize, 10), bytes.len);
 }
 
 test "BinaryFlush layout" {

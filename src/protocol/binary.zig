@@ -457,10 +457,10 @@ test "encode new order" {
 test "encode cancel" {
     var buf: [32]u8 = undefined;
 
-    const encoded = try encodeCancel(&buf, 1, "IBM", 1001);
+    const encoded = try encodeCancel(&buf, 1, 1001);
 
-    // Wire size is 18 bytes (matches server's binary_codec.zig)
-    try std.testing.expectEqual(@as(usize, 18), encoded.len);
+    // Wire size is 10 bytes (matches server's binary_codec.zig)
+    try std.testing.expectEqual(@as(usize, 10), encoded.len);
     try std.testing.expectEqual(types.MAGIC_BYTE, encoded[0]);
     try std.testing.expectEqual(@as(u8, 'C'), encoded[1]);
 }
